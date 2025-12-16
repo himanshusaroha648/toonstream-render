@@ -171,7 +171,8 @@ function deriveSeriesUrlFromEpisode(episodeUrl) {
     const episodeSlug = parts[1] || parts[parts.length - 1] || "";
     if (!episodeSlug) return null;
     const baseSlug = episodeSlug.replace(/-\d+x\d+$/i, "") || episodeSlug;
-    return `${CONFIG.homeUrl}series/${baseSlug}/`;
+    // Use TOONSTREAM_ORIGIN (without /home/) for correct URL structure
+    return `${TOONSTREAM_ORIGIN}/series/${baseSlug}/`;
   } catch {
     return null;
   }
@@ -179,12 +180,14 @@ function deriveSeriesUrlFromEpisode(episodeUrl) {
 
 function buildSeriesUrlFromSlug(seriesSlug) {
   if (!seriesSlug) return null;
-  return `${CONFIG.homeUrl}series/${seriesSlug}/`;
+  // Use TOONSTREAM_ORIGIN (without /home/) for correct URL structure
+  return `${TOONSTREAM_ORIGIN}/series/${seriesSlug}/`;
 }
 
 function buildEpisodeUrl(seriesSlug, season, episode) {
   if (!seriesSlug) return null;
-  return `${CONFIG.homeUrl}episode/${seriesSlug}-${season}x${episode}/`;
+  // Use TOONSTREAM_ORIGIN (without /home/) for correct URL structure
+  return `${TOONSTREAM_ORIGIN}/episode/${seriesSlug}-${season}x${episode}/`;
 }
 
 function buildRequestHeaders(url, options = {}) {
@@ -450,6 +453,52 @@ async function getTMDBData(title, isMovie = false) {
   }
   return details;
 }
+
+async function fetchTMDBEpisodeImage(tmdbId, seasonNum, episodeNum) {
+  const apiKey = process.env.TMDB_API_KEY;
+  if (!apiKey || !tmdbId) return null;
+  
+  try {
+    const url = `${TMDB_BASE_URL}/tv/${tmdbId}/season/${seasonNum}/episode/${episodeNum}?api_key=${apiKey}&language=en-US`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    
+    if (data.still_path) {
+      return `${TMDB_IMAGE_BASE}${data.still_path}`;
+    }
+    return null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function fetchTMDBSeasonEpisodes(tmdbId, seasonNum) {
+  const apiKey = process.env.TMDB_API_KEY;
+  if (!apiKey || !tmdbId) return {};
+  
+  try {
+    const url = `${TMDB_BASE_URL}/tv/${tmdbId}/season/${seasonNum}?api_key=${apiKey}&language=en-US`;
+    const res = await fetch(url);
+    if (!res.ok) return {};
+    const data = await res.json();
+    
+    const episodeImages = {};
+    if (data.episodes && Array.isArray(data.episodes)) {
+      for (const ep of data.episodes) {
+        if (ep.still_path) {
+          episodeImages[ep.episode_number] = `${TMDB_IMAGE_BASE}${ep.still_path}`;
+        }
+      }
+    }
+    return episodeImages;
+  } catch (err) {
+    return {};
+  }
+}
+
+// Cache for TMDB episode images per series
+const tmdbEpisodeImageCache = new Map();
 
 function extractEpisodeCards(html) {
   const $ = cheerio.load(html);
@@ -1362,14 +1411,48 @@ async function buildEpisodeRecord(episodeUrl, hints = {}) {
     console.warn(`  ⚠️ Failed to fetch episode image from API: ${err.message}`);
   }
 
+  // Try to fetch episode image from TMDB
+  let tmdbEpisodeImage = null;
+  if (seriesCtx.tmdb_id && process.env.TMDB_API_KEY) {
+    try {
+      // Check cache first
+      const cacheKey = `${seriesCtx.tmdb_id}-${code.season}`;
+      if (!tmdbEpisodeImageCache.has(cacheKey)) {
+        // Fetch all episode images for this season and cache them
+        const seasonImages = await fetchTMDBSeasonEpisodes(seriesCtx.tmdb_id, code.season);
+        tmdbEpisodeImageCache.set(cacheKey, seasonImages);
+      }
+      
+      const cachedImages = tmdbEpisodeImageCache.get(cacheKey) || {};
+      if (cachedImages[code.episode]) {
+        tmdbEpisodeImage = cachedImages[code.episode];
+        console.log(`   🖼️  TMDB episode image found for S${code.season}E${code.episode}`);
+      } else {
+        // Fallback to individual episode fetch
+        tmdbEpisodeImage = await fetchTMDBEpisodeImage(seriesCtx.tmdb_id, code.season, code.episode);
+        if (tmdbEpisodeImage) {
+          // Cache the individual result to avoid repeated API calls
+          cachedImages[code.episode] = tmdbEpisodeImage;
+          tmdbEpisodeImageCache.set(cacheKey, cachedImages);
+          console.log(`   🖼️  TMDB episode image fetched for S${code.season}E${code.episode}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`  ⚠️ Failed to fetch TMDB episode image: ${err.message}`);
+    }
+  }
+
+  // Priority: TMDB image > API image > scraped meta
+  const bestImage = tmdbEpisodeImage || apiEpisodeImage;
+
   const episodePayload = {
     title: meta.title || hints.card?.title || `Episode ${code.episode}`,
-    thumbnail: apiEpisodeImage || meta.thumbnail || hints.card?.thumb || seriesCtx.poster,
-    episode_main_poster: apiEpisodeImage || meta.episode_main_poster || seriesCtx.poster,
-    episode_card_thumbnail: apiEpisodeImage || meta.thumbnail || hints.card?.thumb || null,
-    episode_list_thumbnail: apiEpisodeImage || hints.card?.thumb || meta.thumbnail || null,
+    thumbnail: bestImage || meta.thumbnail || hints.card?.thumb || seriesCtx.poster,
+    episode_main_poster: bestImage || meta.episode_main_poster || seriesCtx.poster,
+    episode_card_thumbnail: bestImage || meta.thumbnail || hints.card?.thumb || null,
+    episode_list_thumbnail: bestImage || hints.card?.thumb || meta.thumbnail || null,
     video_player_thumbnail:
-      apiEpisodeImage || meta.episode_main_poster || meta.thumbnail || hints.card?.thumb || null,
+      bestImage || meta.episode_main_poster || meta.thumbnail || hints.card?.thumb || null,
     servers: embeds,
   };
 
@@ -1530,24 +1613,68 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
     // Extract post ID and nonce from series page
     const postId = extractPostId(html);
     const nonce = extractNonce(html);
-    if (!postId) {
-      console.warn(`   ⚠️  No post ID found for ${seriesCtx.title}, skipping`);
-      return;
-    }
+    
+    // FIRST: Extract episode links directly from series page HTML
+    // This gives us the correct URLs as shown on the page
+    const htmlEpisodeLinks = extractSeriesEpisodeLinks(html, seriesCtx.url);
+    const htmlUrlMap = new Map();
+    htmlEpisodeLinks.forEach(ep => {
+      const key = `${ep.season}x${ep.episode}`;
+      htmlUrlMap.set(key, ep);
+    });
     
     // Extract available seasons
     const seasons = extractSeasonNumbers(html);
     console.log(`      🔍 Found ${seasons.length} season(s) for ${seriesCtx.title}`);
     
     // Fetch all episodes from all seasons using WordPress AJAX API
+    // This gives us the episode counts and metadata
     const allEpisodeLinks = [];
     for (const season of seasons) {
       const episodeData = await fetchEpisodeDataFromAPI(postId, season, nonce);
       if (episodeData && episodeData.length > 0) {
         console.log(`         • Season ${season}: ${episodeData.length} episode(s)`);
-        allEpisodeLinks.push(...episodeData);
+        
+        // For each episode from API, ensure we have a valid URL
+        for (const ep of episodeData) {
+          const key = `${ep.season}x${ep.episode}`;
+          const htmlEp = htmlUrlMap.get(key);
+          
+          // Use URL from HTML if available and valid, otherwise build correct URL
+          let validUrl = null;
+          if (htmlEp && htmlEp.url && htmlEp.url.includes('/episode/') && !htmlEp.url.endsWith('/episode/')) {
+            validUrl = htmlEp.url;
+          } else if (ep.url && ep.url.includes('/episode/') && !ep.url.endsWith('/episode/')) {
+            validUrl = ep.url;
+          } else {
+            // Build the correct episode URL using series slug
+            validUrl = buildEpisodeUrl(seriesCtx.slug, ep.season, ep.episode);
+          }
+          
+          allEpisodeLinks.push({
+            url: validUrl,
+            season: ep.season,
+            episode: ep.episode,
+            title: ep.title || htmlEp?.title,
+            image: ep.image || htmlEp?.thumb,
+          });
+        }
       }
       await delay(300); // Small delay between API calls
+    }
+    
+    // If API returned nothing, use HTML episode links as fallback
+    if (allEpisodeLinks.length === 0 && htmlEpisodeLinks.length > 0) {
+      console.log(`      📄 Using ${htmlEpisodeLinks.length} episodes from page HTML`);
+      for (const ep of htmlEpisodeLinks) {
+        allEpisodeLinks.push({
+          url: ep.url,
+          season: ep.season,
+          episode: ep.episode,
+          title: ep.title,
+          image: ep.thumb,
+        });
+      }
     }
     
     if (allEpisodeLinks.length === 0) {
@@ -1582,24 +1709,41 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
     let episodesToSync = [];
     
     if (triggeringEpisode) {
-      // Check if previous episode exists
-      const prevEpisode = triggeringEpisode.episode - 1;
-      const prevKey = makeSeasonEpisodeKey(triggeringEpisode.season, prevEpisode);
-      const prevExists = existingEpisodes.has(prevKey) || prevEpisode < 1;
+      // Check if ALL old episodes exist (not just the previous one)
+      // Find all episodes that should exist before the triggering episode
+      const oldEpisodesMissing = missing.filter((m) => {
+        // Same season but earlier episode
+        if (m.season === triggeringEpisode.season && m.episode < triggeringEpisode.episode) {
+          return true;
+        }
+        // Earlier season
+        if (m.season < triggeringEpisode.season) {
+          return true;
+        }
+        return false;
+      });
       
-      if (prevExists) {
-        // Previous episode exists (or this is episode 1) - only sync the new episode
+      if (oldEpisodesMissing.length === 0) {
+        // All old episodes exist - only sync the new episode
         const newEp = missing.find(
           (m) => m.season === triggeringEpisode.season && m.episode === triggeringEpisode.episode
         );
         if (newEp) {
           episodesToSync = [newEp];
-          console.log(`      🎯 Smart sync: Previous episode S${triggeringEpisode.season}E${prevEpisode} exists, fetching only new episode`);
+          console.log(`      🎯 Smart sync: All ${existingEpisodes.size} old episodes exist, fetching only new episode`);
         }
       } else {
-        // Previous episode doesn't exist - need to backfill all missing episodes
+        // Some old episodes are missing - backfill all missing episodes
         episodesToSync = missing;
-        console.log(`      📥 Smart sync: Previous episode S${triggeringEpisode.season}E${prevEpisode} missing, fetching ${missing.length} episodes`);
+        console.log(`      📥 Smart sync: ${oldEpisodesMissing.length} old episode(s) missing, fetching all ${missing.length} episodes`);
+        
+        // Log which old episodes are missing
+        if (oldEpisodesMissing.length <= 5) {
+          const missingList = oldEpisodesMissing.map(e => `S${e.season}E${e.episode}`).join(', ');
+          console.log(`         Missing old episodes: ${missingList}`);
+        } else {
+          console.log(`         Missing old episodes: ${oldEpisodesMissing.length} episodes from S${oldEpisodesMissing[0].season}E${oldEpisodesMissing[0].episode} onwards`);
+        }
       }
     } else {
       // No triggering episode info - sync all missing
