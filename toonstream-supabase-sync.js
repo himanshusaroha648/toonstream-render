@@ -190,6 +190,18 @@ function buildEpisodeUrl(seriesSlug, season, episode) {
   return `${TOONSTREAM_ORIGIN}/episode/${seriesSlug}-${season}x${episode}/`;
 }
 
+function isValidEpisodeUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  // Must include /episode/ and have content after it (not just /episode/ or /series/episode/)
+  if (!url.includes('/episode/')) return false;
+  // Check that there's actual episode content in the URL (slug-seasonXepisode pattern)
+  const episodePart = url.split('/episode/')[1];
+  if (!episodePart || episodePart === '' || episodePart === '/') return false;
+  // Reject URLs like /series/episode/ without actual episode slug
+  if (url.endsWith('/episode/') || url.endsWith('/episode')) return false;
+  return true;
+}
+
 function buildRequestHeaders(url, options = {}) {
   const headers = {
     "User-Agent": getUA(),
@@ -460,15 +472,19 @@ async function fetchTMDBEpisodeImage(tmdbId, seasonNum, episodeNum) {
   
   try {
     const url = `${TMDB_BASE_URL}/tv/${tmdbId}/season/${seasonNum}/episode/${episodeNum}?api_key=${apiKey}&language=en-US`;
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    const data = await res.json();
+    const response = await axios.get(url, { timeout: 10000 });
+    const data = response.data;
     
-    if (data.still_path) {
-      return `${TMDB_IMAGE_BASE}${data.still_path}`;
+    if (data && data.still_path) {
+      const imageUrl = `${TMDB_IMAGE_BASE}${data.still_path}`;
+      return imageUrl;
     }
     return null;
   } catch (err) {
+    // Only log if it's not a 404 (episode not found is normal)
+    if (err.response?.status !== 404) {
+      console.warn(`   ⚠️ TMDB episode image fetch error: ${err.message}`);
+    }
     return null;
   }
 }
@@ -479,12 +495,11 @@ async function fetchTMDBSeasonEpisodes(tmdbId, seasonNum) {
   
   try {
     const url = `${TMDB_BASE_URL}/tv/${tmdbId}/season/${seasonNum}?api_key=${apiKey}&language=en-US`;
-    const res = await fetch(url);
-    if (!res.ok) return {};
-    const data = await res.json();
+    const response = await axios.get(url, { timeout: 15000 });
+    const data = response.data;
     
     const episodeImages = {};
-    if (data.episodes && Array.isArray(data.episodes)) {
+    if (data && data.episodes && Array.isArray(data.episodes)) {
       for (const ep of data.episodes) {
         if (ep.still_path) {
           episodeImages[ep.episode_number] = `${TMDB_IMAGE_BASE}${ep.still_path}`;
@@ -493,6 +508,10 @@ async function fetchTMDBSeasonEpisodes(tmdbId, seasonNum) {
     }
     return episodeImages;
   } catch (err) {
+    // Only log if it's not a 404 (season not found is normal for some anime)
+    if (err.response?.status !== 404) {
+      console.warn(`   ⚠️ TMDB season episodes fetch error: ${err.message}`);
+    }
     return {};
   }
 }
@@ -1195,6 +1214,11 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
     console.warn(`TMDB lookup failed for ${meta.title}: ${err.message}`);
   }
 
+  // IMPORTANT: Track TMDB poster separately for episode image usage
+  // Episode images should ONLY use TMDB sources
+  const tmdbPoster = tmdbData?.poster || null;
+  const tmdbBanner = tmdbData?.banner_image || null;
+  
   const payload = {
     slug,
     title: meta.title,
@@ -1237,7 +1261,15 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
   
   console.log(`   ✅ Supabase: Series upserted successfully`);
 
-  const ctx = { ...payload, url: seriesUrl, sourceSlug: sourceSlug || slug };
+  // Store TMDB poster in context for episode image usage (not saved to DB)
+  const ctx = { 
+    ...payload, 
+    url: seriesUrl, 
+    sourceSlug: sourceSlug || slug,
+    // Track TMDB-only poster in memory for episode image fallback
+    tmdb_poster: tmdbPoster,
+    tmdb_banner: tmdbBanner,
+  };
   seriesCache.set(seriesUrl, ctx);
   return ctx;
 }
@@ -1288,15 +1320,16 @@ async function checkEpisodeNeedsUpdate(seriesSlug, season, episode) {
   if (!data) return { exists: false, needsUpdate: true };
 
   const hasServers = data.servers && Array.isArray(data.servers) && data.servers.length > 0;
-  const hasThumbnail = Boolean(data.thumbnail);
-  const hasPoster = Boolean(data.episode_main_poster);
-
+  
+  // TMDB-ONLY POLICY: Only check for missing servers, not thumbnails
+  // Thumbnails may be null if TMDB has no image - this is expected behavior
   return {
     exists: true,
-    needsUpdate: !hasServers || !hasThumbnail || !hasPoster,
+    needsUpdate: !hasServers, // Only servers trigger an update
     missingServers: !hasServers,
-    missingThumbnail: !hasThumbnail,
-    missingPoster: !hasPoster,
+    // These are informational only, not used for update decisions
+    hasThumbnail: Boolean(data.thumbnail),
+    hasPoster: Boolean(data.episode_main_poster),
   };
 }
 
@@ -1413,28 +1446,44 @@ async function buildEpisodeRecord(episodeUrl, hints = {}) {
 
   // Try to fetch episode image from TMDB
   let tmdbEpisodeImage = null;
-  if (seriesCtx.tmdb_id && process.env.TMDB_API_KEY) {
+  const hasTmdbId = !!seriesCtx.tmdb_id;
+  const hasTmdbKey = !!process.env.TMDB_API_KEY;
+  
+  if (!hasTmdbId) {
+    console.log(`   ⚠️  TMDB: No TMDB ID for series "${seriesCtx.title}" - cannot fetch episode images`);
+  } else if (!hasTmdbKey) {
+    console.log(`   ⚠️  TMDB: TMDB_API_KEY not set - cannot fetch episode images`);
+  }
+  
+  if (hasTmdbId && hasTmdbKey) {
     try {
+      console.log(`   🔍 TMDB: Fetching episode image for S${code.season}E${code.episode} (TMDB ID: ${seriesCtx.tmdb_id})`);
+      
       // Check cache first
       const cacheKey = `${seriesCtx.tmdb_id}-${code.season}`;
       if (!tmdbEpisodeImageCache.has(cacheKey)) {
         // Fetch all episode images for this season and cache them
+        console.log(`   📥 TMDB: Fetching all episode images for season ${code.season}...`);
         const seasonImages = await fetchTMDBSeasonEpisodes(seriesCtx.tmdb_id, code.season);
         tmdbEpisodeImageCache.set(cacheKey, seasonImages);
+        console.log(`   ✅ TMDB: Cached ${Object.keys(seasonImages).length} episode images for season ${code.season}`);
       }
       
       const cachedImages = tmdbEpisodeImageCache.get(cacheKey) || {};
       if (cachedImages[code.episode]) {
         tmdbEpisodeImage = cachedImages[code.episode];
-        console.log(`   🖼️  TMDB episode image found for S${code.season}E${code.episode}`);
+        console.log(`   🖼️  TMDB: Episode image found for S${code.season}E${code.episode}`);
       } else {
         // Fallback to individual episode fetch
+        console.log(`   🔄 TMDB: No cached image, trying individual fetch for S${code.season}E${code.episode}...`);
         tmdbEpisodeImage = await fetchTMDBEpisodeImage(seriesCtx.tmdb_id, code.season, code.episode);
         if (tmdbEpisodeImage) {
           // Cache the individual result to avoid repeated API calls
           cachedImages[code.episode] = tmdbEpisodeImage;
           tmdbEpisodeImageCache.set(cacheKey, cachedImages);
-          console.log(`   🖼️  TMDB episode image fetched for S${code.season}E${code.episode}`);
+          console.log(`   🖼️  TMDB: Episode image fetched for S${code.season}E${code.episode}`);
+        } else {
+          console.log(`   ⚠️  TMDB: No episode image available on TMDB for S${code.season}E${code.episode}`);
         }
       }
     } catch (err) {
@@ -1442,24 +1491,40 @@ async function buildEpisodeRecord(episodeUrl, hints = {}) {
     }
   }
 
-  // Priority: TMDB image > API image > scraped meta
-  const bestImage = tmdbEpisodeImage || apiEpisodeImage;
+  // ========================================
+  // TMDB-ONLY IMAGE POLICY
+  // ========================================
+  // Episode images MUST come from TMDB only - no scraped images
+  // Use tmdb_poster from series context (guaranteed TMDB source)
+  const tmdbEpisodeImg = tmdbEpisodeImage;
+  const tmdbSeriesPoster = seriesCtx.tmdb_poster || null; // ONLY TMDB poster, not scraped
+  
+  // Determine the best TMDB image to use
+  const bestTmdbImage = tmdbEpisodeImg || tmdbSeriesPoster;
+  
+  // Log TMDB image status
+  if (tmdbEpisodeImg) {
+    console.log(`   🖼️  TMDB: Using episode-specific image for S${code.season}E${code.episode}`);
+  } else if (tmdbSeriesPoster) {
+    console.log(`   🖼️  TMDB: Using series poster as fallback for S${code.season}E${code.episode}`);
+  } else {
+    console.log(`   ⚠️  TMDB: No TMDB image available for S${code.season}E${code.episode} - thumbnail will be null`);
+  }
 
   const episodePayload = {
     title: meta.title || hints.card?.title || `Episode ${code.episode}`,
-    thumbnail: bestImage || meta.thumbnail || hints.card?.thumb || seriesCtx.poster,
-    episode_main_poster: bestImage || meta.episode_main_poster || seriesCtx.poster,
-    episode_card_thumbnail: bestImage || meta.thumbnail || hints.card?.thumb || null,
-    episode_list_thumbnail: bestImage || hints.card?.thumb || meta.thumbnail || null,
-    video_player_thumbnail:
-      bestImage || meta.episode_main_poster || meta.thumbnail || hints.card?.thumb || null,
+    // TMDB-ONLY images - null if no TMDB source available
+    thumbnail: bestTmdbImage,
+    episode_main_poster: bestTmdbImage,
+    episode_card_thumbnail: bestTmdbImage,
+    episode_list_thumbnail: bestTmdbImage,
+    video_player_thumbnail: bestTmdbImage,
     servers: embeds,
   };
 
-  if (!episodePayload.thumbnail) {
-    episodePayload.thumbnail =
-      seriesCtx.poster || seriesCtx.cover_image_large || null;
-  }
+  // Note: We intentionally do NOT fall back to seriesCtx.poster here
+  // because it might contain scraped (non-TMDB) images.
+  // Episode thumbnails will only use TMDB images as per the policy.
 
   return { seriesCtx, code, episodePayload };
 }
@@ -1511,13 +1576,9 @@ async function syncEpisodeByUrl(episodeUrl, options = {}) {
           `   🔄 Force updating ${seriesCtx.title} S${code.season}E${code.episode} (refresh all data)`
         );
       } else if (updateCheck.needsUpdate) {
-        // Episode exists but has missing data
-        const missing = [];
-        if (updateCheck.missingServers) missing.push("servers");
-        if (updateCheck.missingThumbnail) missing.push("thumbnail");
-        if (updateCheck.missingPoster) missing.push("poster");
+        // Episode exists but has missing servers (thumbnails use TMDB-only policy)
         console.log(
-          `   🔄 Updating ${seriesCtx.title} S${code.season}E${code.episode} (missing: ${missing.join(", ")})`
+          `   🔄 Updating ${seriesCtx.title} S${code.season}E${code.episode} (missing: servers)`
         );
       }
     }
@@ -1606,6 +1667,18 @@ function extractSeasonNumbers(html) {
 
 async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
   try {
+    // ENSURE SLUG IS ALWAYS AVAILABLE
+    // Extract from URL if not directly set
+    if (!seriesCtx.slug && seriesCtx.url) {
+      seriesCtx.slug = extractSeriesSlugFromUrl(seriesCtx.url);
+    }
+    
+    // Validate we have a slug before proceeding
+    if (!seriesCtx.slug) {
+      console.warn(`   ⚠️ Cannot process series without slug: ${seriesCtx.title || seriesCtx.url}`);
+      return;
+    }
+    
     const html = await fetchHtmlWithRetry(seriesCtx.url, CONFIG.maxRetries, {
       referer: CONFIG.homeUrl,
     });
@@ -1635,20 +1708,31 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
       if (episodeData && episodeData.length > 0) {
         console.log(`         • Season ${season}: ${episodeData.length} episode(s)`);
         
-        // For each episode from API, ensure we have a valid URL
+        // For each episode from API, ALWAYS build the URL using slug + season + episode
+        // This is more reliable than trusting API/HTML URLs which may be malformed
         for (const ep of episodeData) {
           const key = `${ep.season}x${ep.episode}`;
           const htmlEp = htmlUrlMap.get(key);
           
-          // Use URL from HTML if available and valid, otherwise build correct URL
-          let validUrl = null;
-          if (htmlEp && htmlEp.url && htmlEp.url.includes('/episode/') && !htmlEp.url.endsWith('/episode/')) {
-            validUrl = htmlEp.url;
-          } else if (ep.url && ep.url.includes('/episode/') && !ep.url.endsWith('/episode/')) {
-            validUrl = ep.url;
-          } else {
-            // Build the correct episode URL using series slug
-            validUrl = buildEpisodeUrl(seriesCtx.slug, ep.season, ep.episode);
+          // ALWAYS build URL using series slug - this is the most reliable method
+          // Format: https://toonstream.one/episode/{slug}-{season}x{episode}/
+          const builtUrl = buildEpisodeUrl(seriesCtx.slug, ep.season, ep.episode);
+          
+          // Use built URL as primary, only fallback to extracted URLs if build failed
+          let validUrl = builtUrl;
+          if (!isValidEpisodeUrl(validUrl)) {
+            // Fallback: try HTML URL
+            if (htmlEp && htmlEp.url && isValidEpisodeUrl(htmlEp.url)) {
+              validUrl = htmlEp.url;
+            } else if (ep.url && isValidEpisodeUrl(ep.url)) {
+              validUrl = ep.url;
+            }
+          }
+          
+          // VALIDATION: Only add episodes with valid URLs
+          if (!isValidEpisodeUrl(validUrl)) {
+            console.warn(`         ⚠️ Skipping S${ep.season}E${ep.episode}: Could not build valid URL (slug: ${seriesCtx.slug})`);
+            continue;
           }
           
           allEpisodeLinks.push({
@@ -1667,8 +1751,23 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
     if (allEpisodeLinks.length === 0 && htmlEpisodeLinks.length > 0) {
       console.log(`      📄 Using ${htmlEpisodeLinks.length} episodes from page HTML`);
       for (const ep of htmlEpisodeLinks) {
+        // ALWAYS build URL using series slug - this is the most reliable method
+        const builtUrl = buildEpisodeUrl(seriesCtx.slug, ep.season, ep.episode);
+        
+        // Use built URL as primary, fallback to extracted URL if build failed
+        let episodeUrl = builtUrl;
+        if (!isValidEpisodeUrl(episodeUrl) && ep.url && isValidEpisodeUrl(ep.url)) {
+          episodeUrl = ep.url;
+        }
+        
+        // Skip if still invalid
+        if (!isValidEpisodeUrl(episodeUrl)) {
+          console.warn(`         ⚠️ Skipping S${ep.season}E${ep.episode}: Could not build valid URL (slug: ${seriesCtx.slug})`);
+          continue;
+        }
+        
         allEpisodeLinks.push({
-          url: ep.url,
+          url: episodeUrl,
           season: ep.season,
           episode: ep.episode,
           title: ep.title,
@@ -1682,7 +1781,7 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
       return;
     }
 
-    // Get all existing episodes for this series
+    // Get all existing episodes for this series from Supabase
     const { data: existingData } = await supabase
       .from("episodes")
       .select("season, episode, servers, thumbnail, episode_main_poster")
@@ -1694,6 +1793,26 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
       existingEpisodes.add(key);
     });
 
+    // ========================================
+    // EPISODE COUNT COMPARISON LOGIC
+    // ========================================
+    const toonstreamEpisodeCount = allEpisodeLinks.length;
+    const supabaseEpisodeCount = existingData?.length || 0;
+    
+    console.log(`\n      📊 EPISODE COUNT COMPARISON for ${seriesCtx.title}:`);
+    console.log(`         • Toonstream episodes: ${toonstreamEpisodeCount}`);
+    console.log(`         • Supabase episodes: ${supabaseEpisodeCount}`);
+    
+    if (toonstreamEpisodeCount > supabaseEpisodeCount) {
+      const difference = toonstreamEpisodeCount - supabaseEpisodeCount;
+      console.log(`         ⚡ ${difference} new episode(s) detected! Will fetch all missing episodes.`);
+    } else if (toonstreamEpisodeCount === supabaseEpisodeCount) {
+      console.log(`         ✅ Episode counts match - database is up to date`);
+    } else {
+      console.log(`         ℹ️  Supabase has more episodes (possibly deleted on source)`);
+    }
+    // ========================================
+
     // Find missing episodes (new episodes not in database)
     const missing = allEpisodeLinks.filter(
       (link) => !existingEpisodes.has(makeSeasonEpisodeKey(link.season, link.episode)),
@@ -1704,51 +1823,40 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
       return;
     }
 
-    // SMART SYNC LOGIC:
-    // Check if we should fetch only the new episode or all missing episodes
+    // ========================================
+    // SMART SYNC LOGIC - ALWAYS FETCH ALL MISSING
+    // ========================================
+    // When toonstream has more episodes than supabase, fetch ALL missing episodes
+    // This ensures database stays in sync with the source
     let episodesToSync = [];
     
-    if (triggeringEpisode) {
-      // Check if ALL old episodes exist (not just the previous one)
-      // Find all episodes that should exist before the triggering episode
-      const oldEpisodesMissing = missing.filter((m) => {
-        // Same season but earlier episode
-        if (m.season === triggeringEpisode.season && m.episode < triggeringEpisode.episode) {
-          return true;
-        }
-        // Earlier season
-        if (m.season < triggeringEpisode.season) {
-          return true;
-        }
-        return false;
+    // ALWAYS fetch all missing episodes when there's a count difference
+    // Example: Toonstream has 10 episodes, Supabase has 7 → fetch episodes 8, 9, 10
+    episodesToSync = missing;
+    
+    if (missing.length > 0) {
+      // Log the missing episodes for clarity
+      console.log(`\n      📥 BACKFILL MODE: Fetching ${missing.length} missing episode(s)`);
+      
+      // Sort missing episodes for display
+      const sortedMissing = [...missing].sort((a, b) => {
+        if (a.season === b.season) return a.episode - b.episode;
+        return a.season - b.season;
       });
       
-      if (oldEpisodesMissing.length === 0) {
-        // All old episodes exist - only sync the new episode
-        const newEp = missing.find(
-          (m) => m.season === triggeringEpisode.season && m.episode === triggeringEpisode.episode
-        );
-        if (newEp) {
-          episodesToSync = [newEp];
-          console.log(`      🎯 Smart sync: All ${existingEpisodes.size} old episodes exist, fetching only new episode`);
-        }
+      // Log which episodes will be fetched
+      if (sortedMissing.length <= 10) {
+        const missingList = sortedMissing.map(e => `S${e.season}E${e.episode}`).join(', ');
+        console.log(`         Episodes to fetch: ${missingList}`);
       } else {
-        // Some old episodes are missing - backfill all missing episodes
-        episodesToSync = missing;
-        console.log(`      📥 Smart sync: ${oldEpisodesMissing.length} old episode(s) missing, fetching all ${missing.length} episodes`);
-        
-        // Log which old episodes are missing
-        if (oldEpisodesMissing.length <= 5) {
-          const missingList = oldEpisodesMissing.map(e => `S${e.season}E${e.episode}`).join(', ');
-          console.log(`         Missing old episodes: ${missingList}`);
-        } else {
-          console.log(`         Missing old episodes: ${oldEpisodesMissing.length} episodes from S${oldEpisodesMissing[0].season}E${oldEpisodesMissing[0].episode} onwards`);
-        }
+        const first5 = sortedMissing.slice(0, 5).map(e => `S${e.season}E${e.episode}`).join(', ');
+        const last3 = sortedMissing.slice(-3).map(e => `S${e.season}E${e.episode}`).join(', ');
+        console.log(`         Episodes to fetch: ${first5} ... ${last3}`);
       }
-    } else {
-      // No triggering episode info - sync all missing
-      episodesToSync = missing;
-      console.log(`      📥 Full sync: Fetching ${missing.length} missing episodes`);
+      
+      if (triggeringEpisode) {
+        console.log(`         Triggered by new episode: S${triggeringEpisode.season}E${triggeringEpisode.episode}`);
+      }
     }
 
     if (episodesToSync.length === 0) {
@@ -1757,11 +1865,28 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
     }
 
     console.log(
-      `      ↪ ${seriesCtx.title}: Syncing ${episodesToSync.length} episode(s)`,
+      `      ↪ ${seriesCtx.title}: Starting sync of ${episodesToSync.length} episode(s)`,
     );
+    console.log(`         📷 All episode images will be fetched from TMDB\n`);
 
-    // Sync the selected episodes
+    // Sync ALL missing episodes (always backfill)
     for (const link of episodesToSync) {
+      // Final URL validation before syncing
+      if (!isValidEpisodeUrl(link.url)) {
+        // Try to rebuild URL as last resort
+        const rebuiltUrl = buildEpisodeUrl(seriesCtx.slug, link.season, link.episode);
+        if (isValidEpisodeUrl(rebuiltUrl)) {
+          console.log(`         🔧 Rebuilt URL for S${link.season}E${link.episode}: ${rebuiltUrl}`);
+          link.url = rebuiltUrl;
+        } else {
+          console.warn(`         ⚠️ Skipping S${link.season}E${link.episode}: Invalid URL (${link.url}) - slug: ${seriesCtx.slug}`);
+          stats.skippedEpisodes++;
+          continue;
+        }
+      }
+      
+      console.log(`         📥 Fetching S${link.season}E${link.episode}: ${link.url}`);
+      
       await syncEpisodeByUrl(link.url, {
         force: true,
         code: { season: link.season, episode: link.episode },
@@ -1769,10 +1894,14 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
         seriesTitle: seriesCtx.title,
         existingEpisodes,
         card: { title: link.title, thumb: link.image },
-        reason: episodesToSync.length === 1 ? "smart-new" : "backfill",
+        reason: "backfill-missing",
       });
       await delay(750);
     }
+    
+    // Final summary for this series
+    console.log(`      ✅ Completed syncing ${episodesToSync.length} episode(s) for ${seriesCtx.title}`);
+    console.log(`         Database now has ${supabaseEpisodeCount + episodesToSync.length} episodes (matching Toonstream)\n`);
   } catch (err) {
     console.error(`   ❌ Failed to process ${seriesCtx.title}: ${err.message}`);
     stats.failedEpisodes++;
@@ -1812,12 +1941,17 @@ async function auditLatestEpisodes(
         entry.episode,
       );
       const seriesUrl = buildSeriesUrlFromSlug(entry.series_slug);
+      
+      // Clear series cache to ensure fresh TMDB lookup
+      seriesCache.delete(seriesUrl);
 
       await syncEpisodeByUrl(episodeUrl, {
         force: true,
         seriesUrl,
         seriesTitle: entry.series_title,
-        card: { title: entry.episode_title, thumb: entry.thumbnail },
+        // Note: We don't pass thumbnail from entry.thumbnail as it may be scraped
+        // Let the sync fetch fresh TMDB image
+        card: { title: entry.episode_title },
         reason: "latest-audit",
       });
       await delay(500);
@@ -1831,7 +1965,8 @@ async function auditAndUpdateEmptyServers(
   limit = Number(process.env.EMPTY_SERVERS_AUDIT_LIMIT || 50),
 ) {
   try {
-    console.log(`\n🔍 Checking for episodes with missing servers/images...`);
+    console.log(`\n🔍 Checking for episodes with missing servers...`);
+    console.log(`   📷 Note: Missing thumbnails are expected if TMDB has no image (TMDB-only policy)`);
     
     const { data, error } = await supabase
       .from("episodes")
@@ -1847,18 +1982,23 @@ async function auditAndUpdateEmptyServers(
     
     for (const ep of data) {
       const hasServers = ep.servers && Array.isArray(ep.servers) && ep.servers.length > 0;
-      const hasThumbnail = Boolean(ep.thumbnail);
-      const hasPoster = Boolean(ep.episode_main_poster);
-
-      if (!hasServers || !hasThumbnail || !hasPoster) {
+      
+      // TMDB-ONLY POLICY: Only update if servers are missing
+      // We do NOT update for missing thumbnails because:
+      // - If TMDB has no image, thumbnail should remain null
+      // - We don't want to introduce scraped images
+      if (!hasServers) {
         try {
-          const episodeUrl = buildEpisodeUrl(ep.series_slug, ep.season, ep.episode);
+          // Clear series cache to ensure fresh TMDB lookup
           const seriesUrl = buildSeriesUrlFromSlug(ep.series_slug);
+          seriesCache.delete(seriesUrl);
+          
+          const episodeUrl = buildEpisodeUrl(ep.series_slug, ep.season, ep.episode);
 
           await syncEpisodeByUrl(episodeUrl, {
             force: true,
             seriesUrl,
-            reason: "update-missing-data",
+            reason: "update-missing-servers",
           });
           updatedCount++;
           await delay(1000);
@@ -1876,9 +2016,9 @@ async function auditAndUpdateEmptyServers(
     }
 
     if (updatedCount > 0) {
-      console.log(`   ✅ Updated ${updatedCount} episodes with missing data`);
+      console.log(`   ✅ Updated ${updatedCount} episodes with missing servers`);
     } else {
-      console.log(`   ✅ All recent episodes have complete data`);
+      console.log(`   ✅ All recent episodes have video servers`);
     }
     
     if (skippedCount > 0) {
@@ -2006,6 +2146,9 @@ async function updateSeriesFromLatestEpisodes(latestSeriesMap) {
         
         const seriesUrl = buildSeriesUrlFromSlug(slug);
         
+        // Clear series cache to ensure fresh TMDB lookup
+        seriesCache.delete(seriesUrl);
+        
         // Create a minimal series context
         const seriesCtx = {
           slug: slug,
@@ -2014,6 +2157,7 @@ async function updateSeriesFromLatestEpisodes(latestSeriesMap) {
         };
         
         console.log(`   📺 Processing: ${seriesCtx.title} (triggered by S${triggeringEpisode.season}E${triggeringEpisode.episode})`);
+        console.log(`      📷 Episode images: TMDB-only policy enabled`);
         
         // Smart sync: pass triggering episode to determine if backfill is needed
         await ensureSeriesComplete(seriesCtx, triggeringEpisode);
