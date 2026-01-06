@@ -5,7 +5,9 @@ Continuous sync server for Toonstream to Supabase - optimized for Render.com dep
 ## Features
 
 - Automatic sync every 10 minutes
-- TMDB integration for metadata
+- TMDB integration for metadata (series poster, banner)
+- TMDB episode images (fetches still images for each episode)
+- **Smart Backfill**: Checks if old episodes exist in Supabase, if missing then fetches all
 - Proxy support for scraping
 - Real-time status monitoring
 

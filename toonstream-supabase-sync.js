@@ -108,8 +108,22 @@ function getUA() {
 }
 
 function cleanSlug(name) {
-  return (name || "item")
-    .toLowerCase()
+  if (!name) return "item";
+  
+  let cleaned = name.toLowerCase();
+  
+  // Handle specific series mapping
+  // USER REQUEST: Always save Naruto Shippuden as 'naruto-shippden'
+  if (cleaned.includes("naruto shippūden") || cleaned.includes("naruto shippuden") || cleaned.includes("naruto-shippuden") || cleaned.includes("naruto-shippden")) {
+    return "naruto-shippden";
+  }
+
+  // Also check if it's already a full slug that matches naruto shippuden
+  if (/^naruto-shipp[u]?den(-\d+x\d+)?$/i.test(cleaned)) {
+    return "naruto-shippden";
+  }
+
+  return cleaned
     .replace(/['"]/g, "")
     .replace(/[^\w\s-]/g, "")
     .replace(/\s+/g, "-")
@@ -158,7 +172,8 @@ function extractSeriesSlugFromUrl(seriesUrl) {
   try {
     const u = new URL(seriesUrl);
     const parts = u.pathname.split("/").filter(Boolean);
-    return parts.pop() || null;
+    const slug = parts.pop() || null;
+    return cleanSlug(slug);
   } catch {
     return null;
   }
@@ -171,8 +186,9 @@ function deriveSeriesUrlFromEpisode(episodeUrl) {
     const episodeSlug = parts[1] || parts[parts.length - 1] || "";
     if (!episodeSlug) return null;
     const baseSlug = episodeSlug.replace(/-\d+x\d+$/i, "") || episodeSlug;
+    const normalizedSlug = cleanSlug(baseSlug);
     // Use TOONSTREAM_ORIGIN (without /home/) for correct URL structure
-    return `${TOONSTREAM_ORIGIN}/series/${baseSlug}/`;
+    return `${TOONSTREAM_ORIGIN}/series/${normalizedSlug}/`;
   } catch {
     return null;
   }
@@ -1182,51 +1198,72 @@ function extractSeriesMeta(seriesHtml) {
   };
 }
 
-async function resolveSeriesContext(seriesUrl, fallbackTitle) {
-  if (seriesCache.has(seriesUrl)) return seriesCache.get(seriesUrl);
-  const html = await fetchHtmlWithRetry(seriesUrl, CONFIG.maxRetries, {
+async function syncSeries(seriesUrl, options = {}) {
+  // Special handling for Naruto Shippuden
+  if (seriesUrl.includes("naruto-shippuden")) {
+    options.force = true;
+    options.syncAllEpisodes = true;
+    console.log(`   🌀 Special Mapping: Naruto Shippuden detected -> forcing full sync and correct slug mapping`);
+  }
+
+  const rawSlug = extractSeriesSlugFromUrl(seriesUrl);
+  const normalizedSlug = cleanSlug(rawSlug);
+  
+  if (!normalizedSlug) return null;
+
+  // Use cached context if available
+  if (seriesCache.has(normalizedSlug) && !options.force) {
+    return seriesCache.get(normalizedSlug);
+  }
+
+  console.log(`\n   🔍 Syncing series: ${seriesUrl}`);
+  
+  const seriesHtml = await fetchHtmlWithRetry(seriesUrl, CONFIG.maxRetries, {
     referer: CONFIG.homeUrl,
   });
-  const meta = extractSeriesMeta(html);
-  if (!meta.title && fallbackTitle) meta.title = fallbackTitle;
-  if (!meta.title) meta.title = cleanSlug(seriesUrl).replace(/-/g, " ");
-  const sourceSlug =
-    extractSeriesSlugFromUrl(seriesUrl) || cleanSlug(meta.title);
-  const slug = sourceSlug || cleanSlug(meta.title);
+  
+  const meta = extractSeriesMeta(seriesHtml);
+  
+  // NORMALIZE SLUG AND TITLE FOR NARUTO
+  let finalSlug = normalizedSlug;
+  let finalTitle = meta.title;
+
+  if (seriesUrl.includes("naruto-shippuden")) {
+    finalSlug = "naruto-shippden";
+    finalTitle = "Naruto Shippūden";
+  }
 
   // Extract clean series name from slug for TMDB search
-  const slugBasedName = extractSeriesNameFromSlug(slug);
+  const slugBasedName = extractSeriesNameFromSlug(finalSlug);
   
   let tmdbData = null;
   try {
-    // First try with the cleaned slug-based name (better for anime)
+    // First try with the cleaned slug-based name
     if (slugBasedName) {
       console.log(`   🔍 Trying TMDB search with slug name: "${slugBasedName}"`);
       tmdbData = await getTMDBData(slugBasedName);
     }
     
     // If no results, try with page title
-    if (!tmdbData && meta.title && meta.title !== slugBasedName) {
-      console.log(`   🔍 Trying TMDB search with page title: "${meta.title}"`);
-      tmdbData = await getTMDBData(meta.title);
+    if (!tmdbData && finalTitle && finalTitle !== slugBasedName) {
+      console.log(`   🔍 Trying TMDB search with page title: "${finalTitle}"`);
+      tmdbData = await getTMDBData(finalTitle);
     }
   } catch (err) {
-    console.warn(`TMDB lookup failed for ${meta.title}: ${err.message}`);
+    console.warn(`TMDB lookup failed for ${finalTitle}: ${err.message}`);
   }
 
-  // IMPORTANT: Track TMDB poster separately for episode image usage
-  // Episode images should ONLY use TMDB sources
   const tmdbPoster = tmdbData?.poster || null;
   const tmdbBanner = tmdbData?.banner_image || null;
-  
+
   const payload = {
-    slug,
-    title: meta.title,
+    slug: finalSlug,
+    title: finalTitle,
     description: tmdbData?.description || meta.description,
-    poster: tmdbData?.poster || meta.poster,
-    banner_image: tmdbData?.banner_image || null,
-    cover_image_large: tmdbData?.poster || meta.poster,
-    cover_image_extra_large: tmdbData?.poster || meta.poster,
+    poster: tmdbPoster || meta.poster,
+    banner_image: tmdbBanner || null,
+    cover_image_large: tmdbPoster || meta.poster,
+    cover_image_extra_large: tmdbPoster || meta.poster,
     genres: tmdbData?.genres?.length ? tmdbData.genres : meta.genres,
     tmdb_id: tmdbData?.tmdb_id || null,
     rating: tmdbData?.rating || null,
@@ -1245,32 +1282,48 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
         : null),
   };
 
-  console.log(`   💾 Supabase: Upserting series "${meta.title}" (slug: ${slug})...`);
-  console.log(`      📊 TMDB data: ${tmdbData ? 'Yes' : 'No'}, Rating: ${tmdbData?.rating || 'N/A'}`);
+  console.log(`   💾 Supabase: Upserting series "${finalTitle}" (slug: ${finalSlug})...`);
   
-  const { error, data } = await supabase
+  const { error } = await supabase
     .from("series")
-    .upsert(payload, { onConflict: "slug" })
-    .select();
+    .upsert(payload, { onConflict: "slug" });
     
   if (error) {
     console.log(`   ❌ Supabase series upsert FAILED: ${error.message}`);
-    console.log(`      Error code: ${error.code}, Details: ${JSON.stringify(error.details || {})}`);
     throw new Error(`Supabase series upsert failed: ${error.message}`);
   }
   
   console.log(`   ✅ Supabase: Series upserted successfully`);
 
-  // Store TMDB poster in context for episode image usage (not saved to DB)
   const ctx = { 
     ...payload, 
     url: seriesUrl, 
-    sourceSlug: sourceSlug || slug,
-    // Track TMDB-only poster in memory for episode image fallback
+    sourceSlug: rawSlug,
     tmdb_poster: tmdbPoster,
     tmdb_banner: tmdbBanner,
   };
-  seriesCache.set(seriesUrl, ctx);
+  seriesCache.set(finalSlug, ctx);
+
+  // FETCH ALL EPISODES
+  const episodeLinks = extractSeriesEpisodeLinks(seriesHtml, seriesUrl);
+  console.log(`      ✓ Found ${episodeLinks.length} episodes for sync`);
+
+  const existingEpisodes = await getExistingEpisodeSet(finalSlug);
+
+  for (const ep of episodeLinks) {
+    try {
+      await syncEpisodeByUrl(ep.url, {
+        seriesUrl,
+        seriesTitle: finalTitle,
+        force: options.force,
+        existingEpisodes,
+        code: { season: ep.season, episode: ep.episode }
+      });
+    } catch (err) {
+      console.warn(`   ⚠️ Failed to sync episode ${ep.url}: ${err.message}`);
+    }
+  }
+
   return ctx;
 }
 
@@ -1365,6 +1418,14 @@ async function upsertEpisode(
     throw new Error(`Supabase episode upsert failed: ${error.message}`);
   }
   
+  // RETRY LOGIC FOR SINGLE SERVER EPISODES
+  const serverCount = episodePayload.servers?.length || 0;
+  if (serverCount === 1) {
+    await queueEpisodeRetry(seriesSlug, season, episode);
+  } else if (serverCount > 1) {
+    await clearEpisodeRetry(seriesSlug, season, episode);
+  }
+
   console.log(`   ✅ Supabase: Episode upserted successfully`);
 
   const latestPayload = {
@@ -1392,6 +1453,47 @@ async function upsertEpisode(
   }
   
   console.log(`   ✅ Supabase: Latest episode record updated`);
+}
+
+async function resolveSeriesContext(seriesUrl, fallbackTitle) {
+  // Extract and normalize slug from URL immediately
+  const rawSlug = extractSeriesSlugFromUrl(seriesUrl);
+  const normalizedSlug = cleanSlug(rawSlug);
+  
+  // Use normalized slug for cache key to prevent duplicates
+  const cacheKey = normalizedSlug;
+  
+  if (seriesCache.has(cacheKey)) {
+    return seriesCache.get(cacheKey);
+  }
+
+  // Handle Naruto Shippuden specifically
+  let finalSlug = normalizedSlug;
+  let finalTitle = fallbackTitle;
+
+  if (seriesUrl.includes("naruto-shippuden")) {
+    finalSlug = "naruto-shippden";
+    if (!finalTitle || finalTitle.includes("[")) {
+       finalTitle = "Naruto Shippūden";
+    }
+  }
+
+  // Look up in database by slug
+  const { data: existing, error } = await supabase
+    .from("series")
+    .select("*")
+    .eq("slug", finalSlug)
+    .maybeSingle();
+
+  if (existing) {
+    seriesCache.set(cacheKey, existing);
+    return existing;
+  }
+
+  // If not in DB, we need to sync it
+  // This is a simplified version, ideally calls syncSeries
+  const ctx = await syncSeries(seriesUrl, { force: true });
+  return ctx;
 }
 
 async function extractSeriesUrlFromBreadcrumb(html) {
@@ -1551,6 +1653,29 @@ async function syncEpisodeByUrl(episodeUrl, options = {}) {
       code.episode,
     );
 
+    // 1-server retry logic: If only 1 server found, mark for retry after 5 hours
+    const serverCount = episodePayload.servers?.length || 0;
+    if (serverCount === 1) {
+      console.log(`   ⏳ Only 1 server found for ${seriesCtx.title} S${code.season}E${code.episode}. Scheduling retry in 5 hours.`);
+      const retryAt = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString();
+      await supabase
+        .from("episode_retries")
+        .upsert({
+          series_slug: seriesCtx.slug,
+          season: code.season,
+          episode: code.episode,
+          episode_url: episodeUrl,
+          retry_at: retryAt,
+          attempt_count: (updateCheck.retry_count || 0) + 1
+        }, { onConflict: 'series_slug,season,episode' });
+    } else if (serverCount > 1) {
+      // If we now have more than 1 server, remove from retries if it was there
+      await supabase
+        .from("episode_retries")
+        .delete()
+        .match({ series_slug: seriesCtx.slug, season: code.season, episode: code.episode });
+    }
+
     // When force is true, ALWAYS update regardless of processed status
     // This ensures old episodes get refreshed when series has new content
     if (options.force) {
@@ -1613,8 +1738,11 @@ async function syncEpisodeByUrl(episodeUrl, options = {}) {
 
       const context = options.reason ? ` (${options.reason})` : "";
       const attemptInfo = attempt > 1 ? ` (attempt ${attempt})` : "";
+      
+      // Use normalized slug in log for Naruto to confirm it's going to the right place
+      const displayTitle = seriesCtx.slug === "naruto-shippuden" ? "Naruto Shippūden" : seriesCtx.title;
       console.log(
-        `✅ Synced ${seriesCtx.title} S${code.season}E${code.episode}${context}${attemptInfo} | Servers: ${serversCount}`,
+        `✅ Synced ${displayTitle} S${code.season}E${code.episode}${context}${attemptInfo} | Servers: ${serversCount}`,
       );
       // Return seriesCtx with season/episode info for smart sync tracking
       return { ...seriesCtx, season: code.season, episode: code.episode };
@@ -2051,6 +2179,60 @@ async function fetchHomepageHtml() {
   throw lastErr || new Error("All homepage candidates failed");
 }
 
+async function processRetries() {
+  try {
+    const now = new Date().toISOString();
+    const { data: retries, error } = await supabase
+      .from("episode_retries")
+      .select("*")
+      .lte("next_retry_at", now)
+      .limit(10);
+
+    if (error) throw error;
+    if (!retries || retries.length === 0) return;
+
+    console.log(`\n🔄 Processing ${retries.length} scheduled episode retries...`);
+    for (const retry of retries) {
+      console.log(`   🔃 Retrying ${retry.series_slug} S${retry.season}E${retry.episode}...`);
+      await syncEpisodeByUrl(retry.episode_url, {
+        force: true,
+        reason: "scheduled-retry"
+      });
+      // Small delay between retries
+      await delay(1000);
+    }
+  } catch (err) {
+    console.error(`⚠️ Retry processing failed: ${err.message}`);
+  }
+}
+
+async function main() {
+  console.log("🚀 Toonstream -> Supabase sync started");
+  console.log("📡 Fetching latest episodes from Toonstream...\n");
+  
+  // Initialize proxy system
+  await proxyManager.initialize();
+  const proxyStats = proxyManager.getStats();
+  if (proxyStats.enabled) {
+    console.log(`🔐 Proxy Status: ${proxyStats.active}/${proxyStats.total} active\n`);
+  }
+
+  // Step 0: Process scheduled retries
+  await processRetries();
+  
+  // Step 1: Fetch latest from homepage and track which series have new episodes
+  const latestSeriesSlugs = await pollHomepage();
+  
+  // Step 2: Update ALL episodes (old + new) for series with recent activity
+  await updateSeriesFromLatestEpisodes(latestSeriesSlugs);
+
+  // Step 3: Run audits for data integrity
+  await auditLatestEpisodes();
+  await auditAndUpdateEmptyServers();
+
+  printSummary();
+}
+
 async function pollHomepage() {
   // Map of slug -> { season, episode } for smart sync
   const latestSeriesMap = new Map();
@@ -2119,6 +2301,49 @@ function printSummary() {
   console.log("=".repeat(60) + "\n");
 }
 
+async function queueEpisodeRetry(slug, season, ep) {
+  try {
+    const { data: existing } = await supabase
+      .from("episode_retries")
+      .select("*")
+      .eq("series_slug", slug)
+      .eq("season", season)
+      .eq("episode", ep)
+      .maybeSingle();
+
+    let retryCount = existing?.retry_count || 0;
+    if (retryCount >= 3) return; // Max 3 retries (3h, 5h, 10h)
+
+    const nextIntervals = [3, 5, 10]; // hours
+    const nextRetry = new Date();
+    nextRetry.setHours(nextRetry.getHours() + nextIntervals[retryCount]);
+
+    await supabase.from("episode_retries").upsert({
+      series_slug: slug,
+      season,
+      episode: ep,
+      retry_count: retryCount + 1,
+      next_retry_at: nextRetry.toISOString(),
+      updated_at: new Date().toISOString()
+    });
+    console.log(`   🕒 Queued retry #${retryCount + 1} for S${season}E${ep} in ${nextIntervals[retryCount]} hours`);
+  } catch (err) {
+    console.warn(`   ⚠️ Failed to queue retry: ${err.message}`);
+  }
+}
+
+async function clearEpisodeRetry(slug, season, ep) {
+  try {
+    await supabase.from("episode_retries")
+      .delete()
+      .eq("series_slug", slug)
+      .eq("season", season)
+      .eq("episode", ep);
+  } catch (err) {
+    // Ignore error
+  }
+}
+
 async function updateSeriesFromLatestEpisodes(latestSeriesMap) {
   try {
     if (!latestSeriesMap || latestSeriesMap.size === 0) {
@@ -2177,29 +2402,7 @@ async function updateSeriesFromLatestEpisodes(latestSeriesMap) {
 }
 
 export async function start() {
-  console.log("🚀 Toonstream -> Supabase sync started");
-  console.log("📡 Fetching latest episodes from Toonstream...\n");
-  
-  // Initialize proxy system
-  await proxyManager.initialize();
-  const proxyStats = proxyManager.getStats();
-  if (proxyStats.enabled) {
-    console.log(`🔐 Proxy Status: ${proxyStats.active}/${proxyStats.total} active\n`);
-  }
-  
-  // Step 1: Fetch latest from homepage and track which series have new episodes
-  const latestSeriesSlugs = await pollHomepage();
-  
-  // Step 2: Update ALL episodes (old + new) for series with recent activity
-  await updateSeriesFromLatestEpisodes(latestSeriesSlugs);
-  
-  // Step 3: Audit and restore from latest_episodes
-  await auditLatestEpisodes();
-  
-  // Step 4: Final check for any episodes with missing data
-  await auditAndUpdateEmptyServers();
-  
-  printSummary();
+  await main();
 }
 
 // Run directly if this file is executed standalone (not imported)
