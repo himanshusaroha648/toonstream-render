@@ -1,0 +1,21 @@
+ services:
+  - type: web
+    name: toonstream-sync
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: TMDB_API_KEY
+        sync: false
+      - key: USE_PROXY
+        value: "false"
+      - key: CRON_SCHEDULE
+        value: "*/10 * * * *"
