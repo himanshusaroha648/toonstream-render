@@ -1,0 +1,143 @@
+{
+  "yuri-on-ice-1-12": {
+    "exists": true
+  },
+  "yuri-on-ice-1-11": {
+    "exists": true
+  },
+  "yuri-on-ice-1-10": {
+    "exists": true
+  },
+  "yuri-on-ice-1-9": {
+    "exists": true
+  },
+  "yuri-on-ice-1-8": {
+    "exists": true
+  },
+  "yuri-on-ice-1-7": {
+    "exists": true
+  },
+  "yuri-on-ice-1-6": {
+    "exists": true
+  },
+  "yuri-on-ice-1-5": {
+    "exists": true
+  },
+  "yuri-on-ice-1-4": {
+    "exists": true
+  },
+  "you-and-i-are-polar-opposites-1-5": {
+    "series_slug": "you-and-i-are-polar-opposites",
+    "season": 1,
+    "episode": 5,
+    "title": "You and I Are Polar Opposites 1x5",
+    "thumbnail": "https://artworks.thetvdb.com/banners/v4/episode/11516443/screencap/698860b6c0d7a.jpg",
+    "episode_main_poster": "https://artworks.thetvdb.com/banners/v4/episode/11516443/screencap/698860b6c0d7a.jpg",
+    "episode_card_thumbnail": "https://artworks.thetvdb.com/banners/v4/episode/11516443/screencap/698860b6c0d7a.jpg",
+    "episode_list_thumbnail": "https://artworks.thetvdb.com/banners/v4/episode/11516443/screencap/698860b6c0d7a.jpg",
+    "video_player_thumbnail": "https://artworks.thetvdb.com/banners/v4/episode/11516443/screencap/698860b6c0d7a.jpg",
+    "servers": [
+      {
+        "name": "Server 1",
+        "url": "https://as-cdn21.top/video/f37cf9ea93740f0bd3177789c2b244e4",
+        "real_video": "https://as-cdn21.top/video/f37cf9ea93740f0bd3177789c2b244e4",
+        "type": "iframe",
+        "intermediate_url": "https://toonstream.dad/home/?trembed=0&trid=43248&trtype=2",
+        "option": 1
+      },
+      {
+        "name": "Server 2",
+        "url": "https://short.icu/QD5wsPEdc",
+        "real_video": "https://short.icu/QD5wsPEdc",
+        "type": "iframe",
+        "intermediate_url": "https://toonstream.dad/home/?trembed=1&trid=43248&trtype=2",
+        "option": 2
+      },
+      {
+        "name": "Server 3",
+        "url": "https://rubystm.com/e/bkydjifp03m3.html",
+        "real_video": "https://rubystm.com/e/bkydjifp03m3.html",
+        "type": "iframe",
+        "intermediate_url": "https://toonstream.dad/home/?trembed=2&trid=43248&trtype=2",
+        "option": 3
+      },
+      {
+        "name": "Server 4",
+        "url": "https://cloudy.upns.one/#6l9x3q",
+        "real_video": "https://cloudy.upns.one/#6l9x3q",
+        "type": "iframe",
+        "intermediate_url": "https://toonstream.dad/home/?trembed=3&trid=43248&trtype=2",
+        "option": 4
+      },
+      {
+        "name": "Server 5",
+        "url": "https://strmup.to/8ce3e02ab6e6",
+        "real_video": "https://strmup.to/8ce3e02ab6e6",
+        "type": "iframe",
+        "intermediate_url": "https://toonstream.dad/home/?trembed=4&trid=43248&trtype=2",
+        "option": 5
+      },
+      {
+        "name": "Server 6",
+        "url": "https://gdmirrorbot.nl/embed/kjmoqfn",
+        "real_video": "https://gdmirrorbot.nl/embed/kjmoqfn",
+        "type": "iframe",
+        "intermediate_url": "https://toonstream.dad/home/?trembed=5&trid=43248&trtype=2",
+        "option": 6
+      },
+      {
+        "name": "Server 7",
+        "url": "https://gdmirrorbot.nl/embed/ptcjwoa",
+        "real_video": "https://gdmirrorbot.nl/embed/ptcjwoa",
+        "type": "iframe",
+        "intermediate_url": "https://toonstream.dad/home/?trembed=6&trid=43248&trtype=2",
+        "option": 7
+      },
+      {
+        "name": "Server 8",
+        "url": "https://gdmirrorbot.nl/embed/o59y9d9",
+        "real_video": "https://gdmirrorbot.nl/embed/o59y9d9",
+        "type": "iframe",
+        "intermediate_url": "https://toonstream.dad/home/?trembed=7&trid=43248&trtype=2",
+        "option": 8
+      },
+      {
+        "name": "Server 9",
+        "url": "https://emturbovid.com/t/69885abc1ab1a",
+        "real_video": "https://emturbovid.com/t/69885abc1ab1a",
+        "type": "iframe",
+        "intermediate_url": "https://toonstream.dad/home/?trembed=8&trid=43248&trtype=2",
+        "option": 9
+      },
+      {
+        "name": "Server 10",
+        "url": "https://vidmoly.net/embed-dz7hvo05w3vk.html",
+        "real_video": "https://vidmoly.net/embed-dz7hvo05w3vk.html",
+        "type": "iframe",
+        "intermediate_url": "https://toonstream.dad/home/?trembed=9&trid=43248&trtype=2",
+        "option": 10
+      }
+    ]
+  },
+  "the-daily-life-of-the-immortal-king-5-5": {
+    "exists": true
+  },
+  "spy-x-family-3-11": {
+    "exists": true
+  },
+  "bofuri-i-dont-want-to-get-hurt-so-ill-max-out-my-defense-1-9": {
+    "exists": true
+  },
+  "tojima-wants-to-be-a-kamen-rider-1-15": {
+    "exists": true
+  },
+  "trigun-stampede-2-2": {
+    "exists": true
+  },
+  "a-misanthrope-teaches-a-class-for-demi-humans-1-2": {
+    "exists": true
+  },
+  "fairy-tail-7-12": {
+    "exists": true
+  }
+}

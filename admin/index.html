@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Toonstream Admin</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .active-tab { border-bottom: 2px solid #3b82f6; color: #3b82f6; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <nav class="bg-white shadow-md p-4">
+        <div class="container mx-auto flex justify-between items-center">
+            <h1 class="text-xl font-bold">Toonstream Admin</h1>
+            <div class="flex items-center space-x-4">
+                <div class="relative">
+                    <input type="text" id="search-db" placeholder="Search Database..." class="p-2 border rounded w-64" oninput="fetchSeries()">
+                </div>
+                <button onclick="showTab('series')" class="tab-btn px-4 py-2" id="series-tab">Series/Movies</button>
+                <button onclick="showTab('add')" class="tab-btn px-4 py-2" id="add-tab">Add New</button>
+            </div>
+        </div>
+    </nav>
+
+    <main class="container mx-auto p-4">
+        <!-- Series List -->
+        <div id="series-section" class="tab-content">
+            <h2 class="text-2xl font-bold mb-4">Series & Movies</h2>
+            <div id="series-grid" class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                <!-- Data injected here -->
+            </div>
+        </div>
+
+        <!-- Add New Section -->
+        <div id="add-section" class="tab-content hidden">
+            <div class="max-w-2xl mx-auto bg-white p-6 rounded shadow">
+                <h2 class="text-2xl font-bold mb-4">Add New Series/Movie</h2>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block mb-1">Type</label>
+                        <select id="add-type" class="w-full p-2 border rounded">
+                            <option value="tv">Series/Anime</option>
+                            <option value="movie">Movie</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block mb-1">TMDB Search / ID</label>
+                        <input type="text" id="add-query" placeholder="Name or TMDB ID" class="w-full p-2 border rounded">
+                    </div>
+                    <button onclick="searchTMDB()" class="bg-blue-500 text-white px-4 py-2 rounded">Search TMDB</button>
+                    
+                    <div id="tmdb-results" class="hidden mt-4 grid grid-cols-2 gap-4">
+                        <!-- Results injected here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Episode Manager Modal -->
+        <div id="episode-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center p-4">
+            <div class="bg-white rounded shadow-xl w-full max-w-4xl max-h-[90vh] overflow-y-auto p-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 id="modal-title" class="text-xl font-bold">Episode Manager</h3>
+                    <button onclick="closeModal()" class="text-gray-500">&times;</button>
+                </div>
+                <div class="space-y-4">
+                    <div class="flex justify-between items-center bg-gray-50 p-3 rounded">
+                        <div class="flex space-x-2">
+                            <input type="number" id="season-num" placeholder="Season" class="w-20 p-2 border rounded" value="1" onchange="loadEpisodes()">
+                            <button onclick="refetchSelectedEpisodes()" class="bg-blue-500 text-white px-3 py-2 rounded text-sm">Refetch Selected Images</button>
+                        </div>
+                        <label class="flex items-center space-x-2 text-sm">
+                            <input type="checkbox" onchange="toggleSelectAll(this)">
+                            <span>Select All</span>
+                        </label>
+                    </div>
+                    
+                    <!-- Single Episode Add -->
+                    <div id="single-add-container" class="bg-blue-50 p-4 rounded border border-blue-100 space-y-3">
+                        <div class="flex justify-between items-center">
+                            <h4 class="font-bold text-sm text-blue-800">Add Single Episode</h4>
+                            <button onclick="toggleAddMode('multiple')" class="text-xs bg-blue-600 text-white px-2 py-1 rounded">Switch to Multiple Add</button>
+                        </div>
+                        <div class="grid grid-cols-1 gap-2">
+                            <input type="number" id="single-ep-num" placeholder="Episode Number" class="p-2 border rounded text-sm">
+                        </div>
+                        <textarea id="single-ep-servers" placeholder="Paste server links here (One per line)&#10;https://server1&#10;https://server2" class="w-full p-2 border rounded h-24 text-sm font-mono"></textarea>
+                        <button onclick="saveSingleEpisode()" class="bg-blue-600 text-white px-4 py-2 rounded w-full text-sm">Add Episode (Auto-fetch Title)</button>
+                    </div>
+
+                    <!-- Multiple Episode Add -->
+                    <div id="multiple-add-container" class="hidden bg-purple-50 p-4 rounded border border-purple-100 space-y-3">
+                        <div class="flex justify-between items-center">
+                            <h4 class="font-bold text-sm text-purple-800">Add Multiple Episodes</h4>
+                            <button onclick="toggleAddMode('single')" class="text-xs bg-purple-600 text-white px-2 py-1 rounded">Switch to Single Add</button>
+                        </div>
+                        <div id="multiple-ep-list" class="space-y-2">
+                            <div class="flex space-x-2 items-center ep-row">
+                                <input type="number" placeholder="Ep" class="w-16 p-2 border rounded text-sm ep-num">
+                                <input type="text" placeholder="Iframe Link" class="flex-1 p-2 border rounded text-sm ep-link">
+                                <button onclick="removeRow(this)" class="text-red-500 font-bold px-2">&times;</button>
+                            </div>
+                        </div>
+                        <button onclick="addMoreRow()" class="text-sm text-purple-700 font-bold">+ Add More</button>
+                        <button onclick="saveMultipleEpisodes()" class="bg-purple-600 text-white px-4 py-2 rounded w-full text-sm">Save All Episodes</button>
+                    </div>
+
+                    <div class="relative">
+                        <div class="absolute inset-0 flex items-center" aria-hidden="true">
+                            <div class="w-full border-t border-gray-300"></div>
+                        </div>
+                        <div class="relative flex justify-center">
+                            <span class="px-2 bg-white text-sm text-gray-500">OR</span>
+                        </div>
+                    </div>
+
+                    <textarea id="bulk-episodes" placeholder="Bulk Add Format: EpNum|Title|URL (One per line)" class="w-full p-2 border rounded h-24 text-sm"></textarea>
+                    <button onclick="saveEpisodes()" class="bg-green-500 text-white px-4 py-2 rounded w-full">Bulk Save Episodes</button>
+                    
+                    <div class="mt-6 border-t pt-4">
+                        <h4 class="font-bold mb-2">Existing Episodes</h4>
+                        <div id="episode-list" class="space-y-1 max-h-64 overflow-y-auto">
+                            <!-- Episodes will be loaded here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let currentSeries = null;
+
+        async function renameSeries(id, oldTitle) {
+            const newName = prompt('Enter new title:', oldTitle);
+            if (!newName || newName === oldTitle) return;
+            const res = await fetch('/api/series/rename', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id, newName })
+            });
+            if (res.ok) fetchSeries();
+        }
+
+        async function searchTMDB() {
+            const query = document.getElementById('add-query').value;
+            const type = document.getElementById('add-type').value;
+            if (!query) return;
+
+            const res = await fetch('/api/tmdb/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query, type })
+            });
+            const results = await res.json();
+            const container = document.getElementById('tmdb-results');
+            container.classList.remove('hidden');
+            container.innerHTML = results.map(r => `
+                <div class="border p-2 rounded cursor-pointer hover:bg-gray-100" onclick="addFromTMDB('${r.id}', '${type}')">
+                    <img src="https://image.tmdb.org/t/p/w200${r.poster_path}" class="w-full h-32 object-cover mb-1">
+                    <p class="text-xs font-bold truncate">${r.name || r.title}</p>
+                </div>
+            `).join('');
+        }
+
+        async function addFromTMDB(tmdbId, type) {
+            const res = await fetch('/api/series/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tmdbId, type })
+            });
+            if (res.ok) {
+                alert('Added successfully!');
+                showTab('series');
+                fetchSeries();
+            }
+        }
+
+        async function fetchSeries() {
+            const query = document.getElementById('search-db').value;
+            if (!query) {
+                document.getElementById('series-grid').innerHTML = '<p class="col-span-full text-center text-gray-500 py-10">Search for a series to manage</p>';
+                return;
+            }
+            const res = await fetch(`/api/series?q=${encodeURIComponent(query)}`);
+            const data = await res.json();
+            const grid = document.getElementById('series-grid');
+            grid.innerHTML = data.map(s => {
+                const safeTitle = s.title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                return `
+                <div class="bg-white p-4 rounded shadow">
+                    <img src="${s.poster || s.poster_path}" class="w-full h-48 object-cover rounded mb-2" onerror="this.src='https://via.placeholder.com/300x450?text=No+Image'">
+                    <h3 class="font-bold truncate">${s.title}</h3>
+                    <p class="text-sm text-gray-500">${s.is_movie ? 'Movie' : 'Series'}</p>
+                    <div class="mt-4 flex flex-wrap gap-2">
+                        <button onclick="renameSeries('${s.id}', \`${safeTitle}\`)" class="text-xs bg-gray-200 px-2 py-1 rounded">Rename</button>
+                        <button onclick="refetchSeries('${s.id}', \`${safeTitle}\`, ${s.is_movie})" class="text-xs bg-blue-100 text-blue-600 px-2 py-1 rounded">Refetch</button>
+                        ${!s.is_movie ? `<button onclick="openEpisodes('${s.id}', \`${safeTitle}\`, '${s.slug}')" class="text-xs bg-green-100 text-green-600 px-2 py-1 rounded">Episodes</button>` : ''}
+                    </div>
+                </div>
+            `;}).join('');
+        }
+
+        async function refetchSeries(id, title, isMovie) {
+            if(!confirm('Refetch data from TMDB for ' + title + '?')) return;
+            const res = await fetch('/api/series/refetch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id, title, type: isMovie ? 'movie' : 'tv' })
+            });
+            if(res.ok) alert('Refetch successful!');
+            fetchSeries();
+        }
+
+        let currentSeriesSlug = null;
+        let currentSeriesTmdbId = null;
+        let currentSeriesTitle = null;
+        function openEpisodes(id, title, slug) {
+            currentSeries = id;
+            currentSeriesSlug = slug;
+            currentSeriesTitle = title;
+            // We'll fetch the series details to get TMDB ID correctly
+            fetch(`/api/series?q=${encodeURIComponent(title)}`).then(r => r.json()).then(data => {
+                const s = data.find(item => item.id == id);
+                currentSeriesTmdbId = s ? s.tmdb_id : null;
+            });
+
+            document.getElementById('modal-title').innerText = 'Manage Episodes: ' + title;
+            document.getElementById('episode-modal').classList.remove('hidden');
+            loadEpisodes();
+        }
+
+        async function loadEpisodes() {
+            const season = document.getElementById('season-num').value;
+            const res = await fetch(`/api/episodes?slug=${currentSeriesSlug}&season=${season}`);
+            const data = await res.json();
+            const list = document.getElementById('episode-list');
+            if (list) {
+                list.innerHTML = data.map(ep => `
+                    <div class="flex justify-between items-center p-2 border-b hover:bg-gray-50">
+                        <div class="flex items-center space-x-3">
+                            <input type="checkbox" class="episode-check" value="${ep.episode}">
+                            <img src="${ep.thumbnail || 'https://via.placeholder.com/80x45'}" class="w-16 h-9 object-cover rounded">
+                            <span class="text-sm">Ep ${ep.episode}: ${ep.title}</span>
+                        </div>
+                        <span class="text-xs text-gray-500 truncate max-w-xs">${ep.servers?.[0]?.url || ''}</span>
+                    </div>
+                `).join('') || '<p class="text-center py-4 text-gray-500">No episodes found for this season</p>';
+            }
+        }
+
+        function toggleSelectAll(cb) {
+            document.querySelectorAll('.episode-check').forEach(el => el.checked = cb.checked);
+        }
+
+        async function refetchSelectedEpisodes() {
+            const selected = Array.from(document.querySelectorAll('.episode-check:checked')).map(el => ({
+                season: document.getElementById('season-num').value,
+                episode: el.value
+            }));
+
+            if (!selected.length) return alert('Select episodes first');
+            if (!currentSeriesTmdbId) return alert('Series TMDB ID not found. Try refetching the series first.');
+
+            if (!confirm(`Refetch images for ${selected.length} episodes?`)) return;
+
+            const res = await fetch('/api/episodes/refetch-images', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    slug: currentSeriesSlug,
+                    tmdbId: currentSeriesTmdbId,
+                    title: currentSeriesTitle,
+                    episodes: selected
+                })
+            });
+
+            if (res.ok) {
+                alert('Refetch completed!');
+                loadEpisodes();
+            }
+        }
+
+        function closeModal() {
+            document.getElementById('episode-modal').classList.add('hidden');
+        }
+
+        async function saveEpisodes() {
+            const season = document.getElementById('season-num').value;
+            const text = document.getElementById('bulk-episodes').value;
+            const episodes = text.split('\n').filter(line => line.includes('|')).map(line => {
+                const [number, title, url] = line.split('|').map(s => s.trim());
+                return { number, title, url };
+            });
+
+            const res = await fetch('/api/episodes/bulk-add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ seriesSlug: currentSeriesSlug, season, episodes })
+            });
+
+            if(res.ok) {
+                alert('Episodes saved!');
+                document.getElementById('bulk-episodes').value = '';
+                loadEpisodes();
+            }
+        }
+
+        async function saveSingleEpisode() {
+            const season = document.getElementById('season-num').value;
+            const number = document.getElementById('single-ep-num').value;
+            const serversRaw = document.getElementById('single-ep-servers').value;
+            
+            if(!number) return alert('Episode number required');
+            if(!serversRaw.trim()) return alert('Please enter at least one server link');
+
+            const res = await fetch('/api/episodes/add-single', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    seriesSlug: currentSeriesSlug,
+                    tmdbId: currentSeriesTmdbId,
+                    season, 
+                    episode: number,
+                    serversRaw
+                })
+            });
+
+            if(res.ok) {
+                const data = await res.json();
+                alert(`Episode added: ${data.title}`);
+                document.getElementById('single-ep-num').value = '';
+                document.getElementById('single-ep-servers').value = '';
+                loadEpisodes();
+            } else {
+                const err = await res.json();
+                alert('Error: ' + err.error);
+            }
+        }
+
+        function showTab(tab) {
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+            document.getElementById(tab + '-section').classList.remove('hidden');
+        }
+
+        function toggleAddMode(mode) {
+            if (mode === 'multiple') {
+                document.getElementById('single-add-container').classList.add('hidden');
+                document.getElementById('multiple-add-container').classList.remove('hidden');
+            } else {
+                document.getElementById('single-add-container').classList.remove('hidden');
+                document.getElementById('multiple-add-container').classList.add('hidden');
+            }
+        }
+
+        function addMoreRow() {
+            const container = document.getElementById('multiple-ep-list');
+            const row = document.createElement('div');
+            row.className = 'flex space-x-2 items-center ep-row';
+            row.innerHTML = `
+                <input type="number" placeholder="Ep" class="w-16 p-2 border rounded text-sm ep-num">
+                <input type="text" placeholder="Iframe Link" class="flex-1 p-2 border rounded text-sm ep-link">
+                <button onclick="removeRow(this)" class="text-red-500 font-bold px-2">&times;</button>
+            `;
+            container.appendChild(row);
+        }
+
+        function removeRow(btn) {
+            const rows = document.querySelectorAll('.ep-row');
+            if (rows.length > 1) {
+                btn.parentElement.remove();
+            }
+        }
+
+        async function saveMultipleEpisodes() {
+            const season = document.getElementById('season-num').value;
+            const rows = document.querySelectorAll('.ep-row');
+            const results = [];
+            
+            for (const row of rows) {
+                const number = row.querySelector('.ep-num').value;
+                const link = row.querySelector('.ep-link').value;
+                if (number && link) {
+                    results.push({
+                        seriesSlug: currentSeriesSlug,
+                        tmdbId: currentSeriesTmdbId,
+                        season,
+                        episode: number,
+                        serversRaw: link
+                    });
+                }
+            }
+
+            if (results.length === 0) return alert('Please add at least one episode');
+
+            let successCount = 0;
+            for (const epData of results) {
+                try {
+                    // Use add-special for dual saving and conversion
+                    const res = await fetch('/api/episodes/add-special', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(epData)
+                    });
+                    if (res.ok) successCount++;
+                } catch (e) {
+                    console.error('Error adding episode:', epData.episode, e);
+                }
+            }
+
+            alert(`Successfully added ${successCount} out of ${results.length} episodes`);
+            if (successCount > 0) {
+                // Clear inputs
+                document.getElementById('multiple-ep-list').innerHTML = `
+                    <div class="flex space-x-2 items-center ep-row">
+                        <input type="number" placeholder="Ep" class="w-16 p-2 border rounded text-sm ep-num">
+                        <input type="text" placeholder="Iframe Link" class="flex-1 p-2 border rounded text-sm ep-link">
+                        <button onclick="removeRow(this)" class="text-red-500 font-bold px-2">&times;</button>
+                    </div>
+                `;
+                loadEpisodes();
+            }
+        }
+
+        fetchSeries();
+    </script>
+</body>
+</html>
