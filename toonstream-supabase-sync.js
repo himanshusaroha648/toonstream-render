@@ -1543,7 +1543,7 @@ async function syncSeries(seriesUrl, options = {}) {
     cover_image_extra_large: tmdbPoster || meta.poster,
     genres: tmdbData?.genres?.length ? tmdbData.genres : meta.genres,
     tmdb_id: tmdbData?.tmdb_id || null,
-    rating: tmdbData?.rating || null,
+    rating: tmdbData?.rating !== undefined && tmdbData?.rating !== null ? tmdbData.rating : (meta.rating || null),
     popularity: tmdbData?.popularity || null,
     status: tmdbData?.status || null,
     studios: tmdbData?.studios || [],
