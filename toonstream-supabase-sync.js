@@ -1704,8 +1704,8 @@ async function upsertEpisode(
     throw new Error(`Supabase episode upsert failed: ${error.message}`);
   }
 
-  // Update random_key for cache-busting
-  const randomKey = Math.random().toString(36).substring(2, 15);
+  // Update random_key for cache-busting (15 characters as requested)
+  const randomKey = Math.random().toString(36).substring(2, 17).padEnd(15, '0').substring(0, 15);
   console.log(`   🔑 Updating random_key for series ${seriesSlug} to: ${randomKey}`);
   await supabase
     .from("series")
@@ -1929,56 +1929,46 @@ async function buildEpisodeRecord(episodeUrl, hints = {}) {
   // FALLBACK TO TVDB IF TMDB FAILS
   // ========================================
   if (!tmdbEpisodeImage) {
-    console.log(`   🔍 TVDB: TMDB failed, searching TVDB for S${code.season}E${code.episode}...`);
+    console.log(`   🔍 TVDB: TMDB image not found, searching TVDB for S${code.season}E${code.episode}...`);
     try {
-      const tvdbId = await searchTVDBSeries(seriesCtx.title);
+      // Clean title for better TVDB matching if needed
+      const searchTitle = seriesCtx.title;
+      const tvdbId = await searchTVDBSeries(searchTitle);
+      
       if (tvdbId) {
+        console.log(`   ✓ TVDB: Found series ID ${tvdbId} for "${searchTitle}"`);
         tmdbEpisodeImage = await fetchTVDBEpisodeImage(tvdbId, code.season, code.episode);
         if (tmdbEpisodeImage) {
           console.log(`   🖼️  TVDB: Episode image found for S${code.season}E${code.episode}`);
         } else {
-          console.log(`   ⚠️  TVDB: No episode image available on TVDB for S${code.season}E${code.episode}`);
+          console.log(`   ⚠️  TVDB: No episode image found for S${code.season}E${code.episode}`);
         }
+      } else {
+        console.log(`   ⚠️  TVDB: Could not find series "${searchTitle}" on TVDB`);
       }
     } catch (err) {
-      console.warn(`  ⚠️ TVDB: Fallback fetch failed: ${err.message}`);
+      console.warn(`  ⚠️ TVDB fallback failed: ${err.message}`);
     }
   }
 
-  // ========================================
   // TMDB-ONLY IMAGE POLICY
   // ========================================
-  // Episode images MUST come from TMDB only - no scraped images
-  // Use tmdb_poster from series context (guaranteed TMDB source)
+  // Episode images MUST come from TMDB or TVDB only - no scraped images
   const tmdbEpisodeImg = tmdbEpisodeImage;
-  const tmdbSeriesPoster = seriesCtx.tmdb_poster || null; // ONLY TMDB poster, not scraped
+  const tmdbSeriesPoster = seriesCtx.tmdb_poster || null; 
   
-  // Determine the best TMDB image to use
-  const bestTmdbImage = tmdbEpisodeImg || tmdbSeriesPoster;
+  // Determine the best image to use
+  const bestImage = tmdbEpisodeImg || tmdbSeriesPoster;
   
-  // Log TMDB image status
-  if (tmdbEpisodeImg) {
-    console.log(`   🖼️  TMDB: Using episode-specific image for S${code.season}E${code.episode}`);
-  } else if (tmdbSeriesPoster) {
-    console.log(`   🖼️  TMDB: Using series poster as fallback for S${code.season}E${code.episode}`);
-  } else {
-    console.log(`   ⚠️  TMDB: No TMDB image available for S${code.season}E${code.episode} - thumbnail will be null`);
-  }
-
   const episodePayload = {
     title: meta.title || hints.card?.title || `Episode ${code.episode}`,
-    // TMDB-ONLY images - null if no TMDB source available
-    thumbnail: bestTmdbImage,
-    episode_main_poster: bestTmdbImage,
-    episode_card_thumbnail: bestTmdbImage,
-    episode_list_thumbnail: bestTmdbImage,
-    video_player_thumbnail: bestTmdbImage,
+    thumbnail: bestImage,
+    episode_main_poster: bestImage,
+    episode_card_thumbnail: bestImage,
+    episode_list_thumbnail: bestImage,
+    video_player_thumbnail: bestImage,
     servers: embeds,
   };
-
-  // Note: We intentionally do NOT fall back to seriesCtx.poster here
-  // because it might contain scraped (non-TMDB) images.
-  // Episode thumbnails will only use TMDB images as per the policy.
 
   return { seriesCtx, code, episodePayload };
 }
