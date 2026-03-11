@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manage Anime Episodes - Admin</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; padding: 20px; }
+        .card { margin-bottom: 20px; }
+        .episode-item { display: flex; align-items: center; padding: 10px; border-bottom: 1px solid #eee; }
+        .episode-item:last-child { border-bottom: none; }
+        #episodeList { max-height: 500px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="mb-4">Episode Manager</h1>
+        
+        <div class="card">
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Search Anime</label>
+                        <input type="text" id="animeSearch" class="form-control" placeholder="Type title...">
+                        <div id="searchResults" class="list-group mt-2"></div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Selected Anime ID</label>
+                        <input type="text" id="tmdbId" class="form-control" readonly>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Preference</label>
+                        <select id="subDub" class="form-control">
+                            <option value="sub">Sub</option>
+                            <option value="dub">Dub</option>
+                            <option value="hindi">Hindi</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="seriesInfo" class="card d-none">
+            <div class="card-body">
+                <h5 id="seriesTitle"></h5>
+                <div class="row">
+                    <div class="col-md-4">
+                        <label class="form-label">Season</label>
+                        <select id="seasonSelect" class="form-control"></select>
+                    </div>
+                    <div class="col-md-4">
+                        <p class="mt-4">Total Episodes: <span id="totalEpCount">0</span></p>
+                    </div>
+                </div>
+                
+                <div class="mt-4">
+                    <h6>Select Episodes to Add</h6>
+                    <div class="mb-2">
+                        <button class="btn btn-sm btn-outline-secondary" onclick="selectAll(true)">Select All</button>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="selectAll(false)">Deselect All</button>
+                    </div>
+                    <div id="episodeList" class="border rounded p-2 bg-white"></div>
+                    <button id="addEpisodesBtn" class="btn btn-primary mt-3 d-none" onclick="addSelectedEpisodes()">Add Selected Episodes</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedSeries = null;
+        let episodes = [];
+
+        document.getElementById('animeSearch').addEventListener('input', async (e) => {
+            const query = e.target.value;
+            if (query.length < 2) return;
+            
+            const res = await fetch('/api/tmdb/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query, type: 'tv' })
+            });
+            const results = await res.json();
+            
+            const resultsDiv = document.getElementById('searchResults');
+            resultsDiv.innerHTML = '';
+            results.forEach(item => {
+                const btn = document.createElement('button');
+                btn.className = 'list-group-item list-group-item-action';
+                btn.textContent = `${item.title} (${item.year})`;
+                btn.onclick = () => selectAnime(item);
+                resultsDiv.appendChild(btn);
+            });
+        });
+
+        async function selectAnime(item) {
+            selectedSeries = item;
+            document.getElementById('tmdbId').value = item.id;
+            document.getElementById('searchResults').innerHTML = '';
+            document.getElementById('animeSearch').value = item.title;
+            
+            document.getElementById('seriesInfo').classList.remove('d-none');
+            document.getElementById('seriesTitle').textContent = item.title;
+            
+            // Get seasons
+            const res = await fetch(`/api/tmdb/details?id=${item.id}&type=tv`);
+            const details = await res.json();
+            
+            const seasonSelect = document.getElementById('seasonSelect');
+            seasonSelect.innerHTML = '';
+            details.seasons.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s.season_number;
+                opt.textContent = `Season ${s.season_number} (${s.episode_count} eps)`;
+                seasonSelect.appendChild(opt);
+            });
+            
+            seasonSelect.onchange = () => loadEpisodes(item.id, seasonSelect.value);
+            loadEpisodes(item.id, seasonSelect.value);
+        }
+
+        async function loadEpisodes(tmdbId, season) {
+            const res = await fetch(`/api/tmdb/episodes?id=${tmdbId}&season=${season}`);
+            episodes = await res.json();
+            
+            document.getElementById('totalEpCount').textContent = episodes.length;
+            const listDiv = document.getElementById('episodeList');
+            listDiv.innerHTML = '';
+            
+            episodes.forEach(ep => {
+                const div = document.createElement('div');
+                div.className = 'episode-item';
+                div.innerHTML = `
+                    <input type="checkbox" class="form-check-input me-3 ep-check" data-num="${ep.episode_number}">
+                    <span>Episode ${ep.episode_number}: ${ep.name}</span>
+                `;
+                listDiv.appendChild(div);
+            });
+            
+            document.getElementById('addEpisodesBtn').classList.remove('d-none');
+        }
+
+        function selectAll(val) {
+            document.querySelectorAll('.ep-check').forEach(c => c.checked = val);
+        }
+
+        async function addSelectedEpisodes() {
+            const selected = Array.from(document.querySelectorAll('.ep-check:checked'))
+                .map(c => parseInt(c.dataset.num));
+            
+            if (selected.length === 0) return alert('Select at least one episode');
+            
+            const subDub = document.getElementById('subDub').value;
+            const season = document.getElementById('seasonSelect').value;
+            
+            const btn = document.getElementById('addEpisodesBtn');
+            btn.disabled = true;
+            btn.textContent = 'Adding...';
+            
+            const payload = {
+                tmdbId: selectedSeries.id,
+                title: selectedSeries.title,
+                season: season,
+                episodes: selected,
+                subDub: subDub
+            };
+            
+            try {
+                const res = await fetch('/api/episodes/add-external', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await res.json();
+                alert('Added successfully!');
+            } catch (err) {
+                alert('Error: ' + err.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Add Selected Episodes';
+            }
+        }
+    </script>
+</body>
+</html>
