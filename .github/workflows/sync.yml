@@ -2,8 +2,8 @@ name: Sync Server
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # हर 10 minutes
-  workflow_dispatch:  # Manual trigger के लिए
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
 
 jobs:
   sync:
@@ -14,10 +14,16 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '18'
+          node-version: '20'
       
       - name: Install dependencies
         run: npm install
       
       - name: Run sync server
-        run: node sync-server.js
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_URL2: ${{ secrets.SUPABASE_URL2 }}
+          SUPABASE_SERVICE_ROLE_KEY2: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY2 }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: node toonstream-sync.js
