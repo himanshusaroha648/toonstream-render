@@ -29,5 +29,5 @@ jobs:
           echo "TVDB_API_KEY=${{ secrets.TVDB_API_KEY }}" >> .env
           echo "SESSION_SECRET=${{ secrets.SESSION_SECRET }}" >> .env
       
-      - name: Run sync server
-        run: node sync-server.js
+      - name: Run sync script
+        run: node toonstream-supabase-sync.js
