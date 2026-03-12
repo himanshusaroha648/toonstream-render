@@ -9,10 +9,10 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4  # ← v3 की जगह v4
+      - uses: actions/checkout@v4
       
       - name: Setup Node.js
-        uses: actions/setup-node@v4  # ← v3 की जगह v4
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
       
@@ -26,4 +26,5 @@ jobs:
           SUPABASE_URL2: ${{ secrets.SUPABASE_URL2 }}
           SUPABASE_SERVICE_ROLE_KEY2: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY2 }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TVDB_API_KEY: ${{ secrets.TVDB_API_KEY }}
         run: node sync-server.js
