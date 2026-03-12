@@ -1,0 +1,23 @@
+name: Sync Server
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # हर 10 minutes में
+  workflow_dispatch:  # Manual trigger के लिए
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'  # या अपना version
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Run sync server
+        run: node sync-server.js
