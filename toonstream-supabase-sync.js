@@ -24,7 +24,7 @@ const supabase = createClient(
 );
 
 const CONFIG = {
-  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstream.one/home",
+  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstream.dad/home/",
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 60_000),
   requestTimeout: 30_000,
   maxRetries: 3,
@@ -800,11 +800,12 @@ async function resolveTrembedUrl(trembedUrl, episodeUrl) {
       }
     })();
     const res = await axios.get(trembedUrl, {
-      headers: {
-        Referer: episodeUrl || pageOrigin,
-        "User-Agent": getUA(),
-      },
+      headers: buildRequestHeaders(trembedUrl, {
+        referer: episodeUrl || pageOrigin,
+      }),
       timeout: 15000,
+      maxRedirects: 5,
+      validateStatus: (status) => status >= 200 && status < 400,
     });
     const pageHtml = res.data || "";
     const $ = cheerio.load(pageHtml);
@@ -951,26 +952,75 @@ async function syncEpisodeByUrl(url, options = {}) {
       url,
       options,
     );
+
+    // Build upsert payload — always update updated_at so it appears in "latest" views
+    const now = new Date().toISOString();
+    const savePayload = {
+      ...episodePayload,
+      series_slug: seriesCtx.slug,
+      season: code.season,
+      episode: code.episode,
+      updated_at: now,
+    };
+
+    // Never overwrite existing servers with an empty array
+    if (!episodePayload.servers || episodePayload.servers.length === 0) {
+      delete savePayload.servers;
+      console.log(`         ⚠️ No servers extracted — keeping existing servers in DB`);
+    } else {
+      console.log(`         💾 Saving ${episodePayload.servers.length} server(s) to DB`);
+    }
+
     const { error } = await supabase
       .from("episodes")
+      .upsert(savePayload, { onConflict: "series_slug,season,episode" });
+    if (error) throw error;
+
+    console.log(`         ✅ DB saved: S${code.season}E${code.episode} [${seriesCtx.slug}] at ${now}`);
+
+    // Also save to latest_episodes table so new/updated episodes appear in latest feeds
+    const { error: latestErr } = await supabase
+      .from("latest_episodes")
       .upsert(
         {
-          ...episodePayload,
           series_slug: seriesCtx.slug,
+          series_title: seriesCtx.title || seriesCtx.slug,
           season: code.season,
           episode: code.episode,
+          episode_title: episodePayload.title || `Episode ${code.episode}`,
+          thumbnail: episodePayload.thumbnail || null,
+          updated_at: now,
         },
         { onConflict: "series_slug,season,episode" },
       );
-    if (error) throw error;
+    if (latestErr) {
+      console.warn(`         ⚠️ latest_episodes save failed: ${latestErr.message}`);
+    } else {
+      console.log(`         📋 latest_episodes updated: S${code.season}E${code.episode} [${seriesCtx.slug}]`);
+    }
+
+    // Update series random_key so frontend cache is invalidated for this series
+    const newRandomKey = Math.random().toString(36).substring(2, 15) +
+      Math.random().toString(36).substring(2, 15);
+    const { error: rkErr } = await supabase
+      .from("series")
+      .update({ random_key: newRandomKey, updated_at: now })
+      .eq("slug", seriesCtx.slug);
+    if (rkErr) {
+      console.warn(`         ⚠️ series random_key update failed: ${rkErr.message}`);
+    } else {
+      console.log(`         🔑 series random_key updated: [${seriesCtx.slug}] → ${newRandomKey}`);
+    }
+
     localEpisodeCache[key] = {
       ...episodePayload,
-      updated_at: new Date().toISOString(),
+      updated_at: now,
     };
     saveCache(EPISODE_CACHE_FILE, localEpisodeCache);
     stats.newEpisodes++;
   } catch (err) {
     stats.failedEpisodes++;
+    console.error(`         ❌ Save failed: ${err.message}`);
     throw err;
   }
 }
@@ -1041,24 +1091,44 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
   const isMovieUrl =
     seriesUrl.includes("/movie/") || seriesUrl.includes("/watch/");
   const finalSlug = cleanSlug(rawSlug);
-  if (seriesCache.has(finalSlug)) return seriesCache.get(finalSlug);
-  if (localSeriesCache[finalSlug]) {
+
+  // Memory cache hit
+  if (seriesCache.has(finalSlug)) {
+    const cached = seriesCache.get(finalSlug);
+    if (!cached.isMovie) return cached; // Only use if it's confirmed a series
+    if (isMovieUrl) return cached;      // URL is movie — use movie cache
+    // Was cached as movie but URL is series — clear cache and re-resolve
+    seriesCache.delete(finalSlug);
+  }
+
+  if (localSeriesCache[finalSlug] && !localSeriesCache[finalSlug].isMovie) {
     const cached = localSeriesCache[finalSlug];
     const ctx = {
       ...cached,
       url: seriesUrl,
       sourceSlug: rawSlug,
-      isMovie: cached.isMovie || false,
+      isMovie: false,
     };
     seriesCache.set(finalSlug, ctx);
     return ctx;
   }
+
+  // Check series table first
   let { data: seriesData } = await supabase
     .from("series")
     .select("*")
     .eq("slug", finalSlug)
     .maybeSingle();
-  let isMovie = false;
+
+  if (seriesData) {
+    const ctx = { ...seriesData, url: seriesUrl, sourceSlug: rawSlug, isMovie: false };
+    seriesCache.set(finalSlug, ctx);
+    localSeriesCache[finalSlug] = { ...seriesData, isMovie: false };
+    saveCache(SERIES_CACHE_FILE, localSeriesCache);
+    return ctx;
+  }
+
+  // Not in series table — check movies table
   if (!seriesData) {
     let { data: movieData } = await supabase
       .from("movies")
@@ -1066,26 +1136,31 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
       .eq("slug", finalSlug)
       .maybeSingle();
     if (movieData) {
-      seriesData = movieData;
-      isMovie = true;
+      if (isMovieUrl) {
+        // Genuine movie URL — use movie record
+        seriesData = movieData;
+        isMovie = true;
+        const ctx = { ...seriesData, url: seriesUrl, sourceSlug: rawSlug, isMovie: true };
+        seriesCache.set(finalSlug, ctx);
+        localSeriesCache[finalSlug] = { ...seriesData, isMovie: true };
+        saveCache(SERIES_CACHE_FILE, localSeriesCache);
+        return ctx;
+      } else {
+        // Was wrongly saved as movie — ignore and re-create in series table below
+        console.log(`   🔁 "${finalSlug}" was in movies table but URL is /series/ — re-creating in series table`);
+      }
     }
-  }
-  if (seriesData) {
-    const ctx = { ...seriesData, url: seriesUrl, sourceSlug: rawSlug, isMovie };
-    seriesCache.set(finalSlug, ctx);
-    localSeriesCache[finalSlug] = { ...seriesData, isMovie };
-    saveCache(SERIES_CACHE_FILE, localSeriesCache);
-    return ctx;
   }
   const seriesHtml = await fetchHtmlWithRetry(seriesUrl);
   const meta = extractSeriesMeta(seriesHtml, seriesUrl);
   const titleForTmdb =
     fallbackTitle || meta.title || extractSeriesNameFromSlug(rawSlug);
+  // Only use URL-based or explicit type detection — never match on raw HTML text
+  // (HTML always contains words like "Movie" or "duration" for unrelated content)
   const isActuallyMovie =
     isMovieUrl ||
-    seriesHtml.includes("Movie") ||
-    meta.genres?.includes("Movie") ||
-    seriesHtml.toLowerCase().includes("duration");
+    (Array.isArray(meta.genres) && meta.genres.some(g => g.toLowerCase() === "movie")) ||
+    meta.type === "movie";
   const tmdbData = await getTMDBData(titleForTmdb, isActuallyMovie);
   const payload = {
     slug: finalSlug,
@@ -1111,7 +1186,19 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
     payload.total_episodes = tmdbData?.total_episodes || null;
     payload.random_key = Math.random().toString(36).substring(2, 15);
   }
-  await supabase.from(targetTable).upsert(payload, { onConflict: "slug" });
+  const { error: seriesUpsertError } = await supabase
+    .from(targetTable)
+    .upsert(payload, { onConflict: "slug" });
+
+  if (seriesUpsertError) {
+    console.error(`   ❌ Series upsert failed for "${finalSlug}": ${seriesUpsertError.message}`);
+    // Still return a ctx so caller can decide, but mark it as unsaved
+    const ctx = { ...payload, url: seriesUrl, sourceSlug: rawSlug, isMovie: isActuallyMovie, _unsaved: true };
+    throw new Error(`Series save failed: ${seriesUpsertError.message}`);
+  }
+
+  console.log(`   ✅ Series saved to DB: ${payload.title} [${finalSlug}]`);
+
   const ctx = {
     ...payload,
     url: seriesUrl,
