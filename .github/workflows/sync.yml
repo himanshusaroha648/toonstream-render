@@ -2,8 +2,8 @@ name: Sync Server
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # हर 10 minutes में
-  workflow_dispatch:  # Manual trigger के लिए
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
 
 jobs:
   sync:
@@ -14,7 +14,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '18'  # या अपना version
+          node-version: '18'
       
       - name: Install dependencies
         run: npm install
