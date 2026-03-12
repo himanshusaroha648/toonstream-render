@@ -17,7 +17,6 @@ let syncStatus = {
 
 import { TMDBService } from "./services/tmdb/tmdb-service.js";
 import { createClient } from "@supabase/supabase-js";
-import "dotenv/config";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
