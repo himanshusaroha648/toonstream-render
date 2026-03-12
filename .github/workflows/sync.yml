@@ -2,8 +2,8 @@ name: Sync Server
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
-  workflow_dispatch:
+    - cron: '*/10 * * * *'  # हर 10 minutes
+  workflow_dispatch:  # Manual trigger के लिए
 
 jobs:
   sync:
