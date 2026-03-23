@@ -24,7 +24,7 @@ const supabase = createClient(
 );
 
 const CONFIG = {
-  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstream.dad/home/",
+  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstream.com/home/",
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 60_000),
   requestTimeout: 30_000,
   maxRetries: 3,
