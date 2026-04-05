@@ -1,9 +1,83 @@
 import express from "express";
 import cron from "node-cron";
+import path from "path";
+import util from "util";
+import { spawn } from "child_process";
 import { start as runSyncScript, fetchFullSeries } from "./toonstream-supabase-sync.js";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const AUTO_SYNC_ON_START = process.env.AUTO_SYNC_ON_START === "true";
+const ENABLE_CRON_SYNC = process.env.ENABLE_CRON_SYNC === "true";
+const ENABLE_TELEGRAM_TRIGGER =
+  process.env.ENABLE_TELEGRAM_TRIGGER !== "false";
+
+let telegramListenerProcess = null;
+
+const LOG_BUFFER_LIMIT = Number(process.env.LOG_BUFFER_LIMIT || 2000);
+const logBuffer = [];
+const logClients = new Set();
+let nextLogId = 1;
+
+const originalConsole = {
+  log: console.log.bind(console),
+  info: console.info.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+};
+
+function stringifyLogArg(value) {
+  if (typeof value === "string") return value;
+  try {
+    return util.inspect(value, { depth: 4, breakLength: 120, colors: false });
+  } catch {
+    return String(value);
+  }
+}
+
+function appendLog(level, args) {
+  const message = args.map(stringifyLogArg).join(" ");
+  const entry = {
+    id: nextLogId++,
+    level,
+    message,
+    timestamp: new Date().toISOString(),
+  };
+
+  logBuffer.push(entry);
+  if (logBuffer.length > LOG_BUFFER_LIMIT) {
+    logBuffer.shift();
+  }
+
+  const payload = `data: ${JSON.stringify(entry)}\n\n`;
+  for (const client of logClients) {
+    try {
+      client.write(payload);
+    } catch {
+      logClients.delete(client);
+    }
+  }
+}
+
+console.log = (...args) => {
+  appendLog("log", args);
+  originalConsole.log(...args);
+};
+
+console.info = (...args) => {
+  appendLog("info", args);
+  originalConsole.info(...args);
+};
+
+console.warn = (...args) => {
+  appendLog("warn", args);
+  originalConsole.warn(...args);
+};
+
+console.error = (...args) => {
+  appendLog("error", args);
+  originalConsole.error(...args);
+};
 
 let syncStatus = {
   isRunning: false,
@@ -34,6 +108,62 @@ app.use(express.json());
 app.use(express.static("public"));
 app.use("/admin", express.static("admin"));
 app.use("/toonstream", express.static("admin/toonstream"));
+
+app.get("/logs", (req, res) => {
+  res.sendFile(path.join(process.cwd(), "admin", "logs.html"));
+});
+
+app.get("/api/logs/recent", (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit || 300), 1), 2000);
+  const beforeId = Number(req.query.beforeId || 0);
+
+  const source =
+    beforeId > 0 ? logBuffer.filter((entry) => entry.id < beforeId) : logBuffer;
+
+  const logs = source.slice(-limit);
+  const oldestBufferedId = logBuffer[0]?.id || null;
+  const newestBufferedId = logBuffer[logBuffer.length - 1]?.id || null;
+  const oldestReturnedId = logs[0]?.id || null;
+
+  res.json({
+    logs,
+    total: logBuffer.length,
+    limit,
+    beforeId: beforeId || null,
+    hasMore:
+      oldestBufferedId !== null &&
+      oldestReturnedId !== null &&
+      oldestReturnedId > oldestBufferedId,
+    oldestBufferedId,
+    newestBufferedId,
+    oldestReturnedId,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get("/api/logs/stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  logClients.add(res);
+  res.write(`data: ${JSON.stringify({ type: "connected", timestamp: new Date().toISOString() })}\n\n`);
+
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(`: ping ${Date.now()}\n\n`);
+    } catch {
+      clearInterval(keepAlive);
+      logClients.delete(res);
+    }
+  }, 30000);
+
+  req.on("close", () => {
+    clearInterval(keepAlive);
+    logClients.delete(res);
+  });
+});
 
 // Dashboard API
 app.get("/api/series", async (req, res) => {
@@ -380,15 +510,57 @@ async function runSync() {
 }
 
 const cronExpression = process.env.CRON_SCHEDULE || "*/10 * * * *";
-cron.schedule(cronExpression, () => {
-  console.log("\n⏰ Scheduled sync triggered");
-  runSync();
-});
+if (ENABLE_CRON_SYNC) {
+  cron.schedule(cronExpression, () => {
+    console.log("\n⏰ Scheduled sync triggered");
+    runSync();
+  });
+} else {
+  console.log("ℹ️ Scheduled sync is disabled (ENABLE_CRON_SYNC=false)");
+}
 
 function updateNextRunTime() {
   const now = new Date();
   const next = new Date(now.getTime() + 600000);
   syncStatus.nextRunTime = next.toISOString();
+}
+
+function startTelegramListener() {
+  if (!ENABLE_TELEGRAM_TRIGGER) {
+    console.log("ℹ️ Telegram trigger listener is disabled (ENABLE_TELEGRAM_TRIGGER=false)");
+    return;
+  }
+
+  if (telegramListenerProcess) {
+    console.log("ℹ️ Telegram listener already running");
+    return;
+  }
+
+  telegramListenerProcess = spawn(process.execPath, ["telegram-chat-listener.js"], {
+    cwd: process.cwd(),
+    stdio: "inherit",
+  });
+
+  console.log("📨 Telegram listener started (telegram-chat-listener.js)");
+
+  telegramListenerProcess.on("close", (code) => {
+    console.log(`⚠️ Telegram listener exited with code ${code}`);
+    telegramListenerProcess = null;
+  });
+
+  telegramListenerProcess.on("error", (err) => {
+    console.error("❌ Failed to start telegram listener:", err?.message || err);
+    telegramListenerProcess = null;
+  });
+}
+
+function stopTelegramListener() {
+  if (!telegramListenerProcess) return;
+  try {
+    telegramListenerProcess.kill("SIGINT");
+  } catch (err) {
+    console.warn("⚠️ Failed to stop telegram listener cleanly:", err?.message || err);
+  }
 }
 
 setInterval(updateNextRunTime, 600000);
@@ -499,23 +671,31 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Toonstream Netlify Sync Server Started`);
   console.log(`${"=".repeat(60)}`);
   console.log(`📡 Server running on port ${PORT}`);
-  console.log(`⏰ Sync schedule: Every 10 minutes`);
+  console.log(`⏰ Sync schedule: ${ENABLE_CRON_SYNC ? `Enabled (${cronExpression})` : "Disabled"}`);
   console.log(`🔐 Proxy enabled: ${process.env.USE_PROXY === "true" ? "Yes" : "No"}`);
   console.log(`🌐 Health check: http://localhost:${PORT}/`);
   console.log(`📊 Status: http://localhost:${PORT}/status`);
   console.log(`🔄 Manual trigger: http://localhost:${PORT}/sync`);
   console.log(`${"=".repeat(60)}\n`);
 
-  console.log("🎬 Running initial sync...\n");
-  runSync();
+  if (AUTO_SYNC_ON_START) {
+    console.log("🎬 Running initial sync...\n");
+    runSync();
+  } else {
+    console.log("🎬 Initial sync is disabled (AUTO_SYNC_ON_START=false)\n");
+  }
+
+  startTelegramListener();
 });
 
 process.on("SIGTERM", () => {
   console.log("\n⚠️  SIGTERM received, shutting down gracefully...");
+  stopTelegramListener();
   process.exit(0);
 });
 
 process.on("SIGINT", () => {
   console.log("\n⚠️  SIGINT received, shutting down gracefully...");
+  stopTelegramListener();
   process.exit(0);
 });

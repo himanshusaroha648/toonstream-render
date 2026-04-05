@@ -17,7 +17,9 @@
     "dotenv": "^16.6.1",
     "express": "^4.19.2",
     "https-proxy-agent": "^7.0.5",
-    "node-cron": "^3.0.3"
+    "input": "^1.0.1",
+    "node-cron": "^3.0.3",
+    "telegram": "^2.26.22"
   },
   "engines": {
     "node": ">=18.0.0"

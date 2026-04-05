@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Toonstream Logs</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      .wrap {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+      .card {
+        background: #111827;
+        border: 1px solid #1f2937;
+        border-radius: 12px;
+      }
+      .header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        justify-content: space-between;
+        padding: 14px 16px;
+        border-bottom: 1px solid #1f2937;
+      }
+      .title {
+        font-weight: 700;
+        font-size: 18px;
+      }
+      .meta {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        font-size: 13px;
+        color: #93c5fd;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #ef4444;
+      }
+      .dot.live {
+        background: #22c55e;
+      }
+      .controls {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      button {
+        background: #1f2937;
+        color: #e5e7eb;
+        border: 1px solid #374151;
+        border-radius: 8px;
+        padding: 8px 10px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #374151;
+      }
+      #logs {
+        margin: 0;
+        padding: 14px 16px;
+        height: calc(100vh - 170px);
+        overflow: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 13px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+      .line { color: #e5e7eb; }
+      .line.warn { color: #facc15; }
+      .line.error { color: #f87171; }
+      .line.info { color: #93c5fd; }
+      .time { color: #94a3b8; margin-right: 8px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <div class="header">
+          <div>
+            <div class="title">Toonstream Live Logs</div>
+            <div class="meta"><span id="statusDot" class="dot"></span><span id="statusText">Connecting...</span></div>
+          </div>
+          <div class="controls">
+            <button id="olderBtn">Load Older Logs</button>
+            <button id="toggleAuto">Auto-scroll: ON</button>
+            <button id="clearBtn">Clear Screen</button>
+            <button id="reloadBtn">Reload Last Logs</button>
+          </div>
+        </div>
+        <div id="logs"></div>
+      </div>
+    </div>
+
+    <script>
+      const logsEl = document.getElementById('logs');
+      const statusDot = document.getElementById('statusDot');
+      const statusText = document.getElementById('statusText');
+      const toggleAutoBtn = document.getElementById('toggleAuto');
+      const clearBtn = document.getElementById('clearBtn');
+      const reloadBtn = document.getElementById('reloadBtn');
+      const olderBtn = document.getElementById('olderBtn');
+
+      let autoScroll = true;
+      let es = null;
+      let oldestLoadedId = null;
+      let hasMoreOlder = true;
+
+      function setStatus(connected) {
+        statusDot.classList.toggle('live', connected);
+        statusText.textContent = connected ? 'Live connected' : 'Disconnected';
+      }
+
+      function fmtTime(ts) {
+        const d = new Date(ts || Date.now());
+        return d.toLocaleString('en-IN', { hour12: true });
+      }
+
+      function makeLine(entry) {
+        if (!entry || !entry.message) return null;
+        const line = document.createElement('div');
+        line.className = `line ${entry.level || 'log'}`;
+        line.dataset.id = entry.id || '';
+        line.innerHTML = `<span class="time">[${fmtTime(entry.timestamp)}]</span>${entry.message.replace(/</g, '&lt;').replace(/>/g, '&gt;')}`;
+        return line;
+      }
+
+      function addLine(entry) {
+        if (!entry || !entry.message) return;
+        const line = makeLine(entry);
+        if (!line) return;
+        logsEl.appendChild(line);
+        if (autoScroll) logsEl.scrollTop = logsEl.scrollHeight;
+      }
+
+      function prependLines(entries) {
+        if (!entries || !entries.length) return;
+
+        const previousHeight = logsEl.scrollHeight;
+        const fragment = document.createDocumentFragment();
+        entries.forEach((entry) => {
+          const line = makeLine(entry);
+          if (line) fragment.appendChild(line);
+        });
+
+        logsEl.prepend(fragment);
+        const newHeight = logsEl.scrollHeight;
+        logsEl.scrollTop += newHeight - previousHeight;
+      }
+
+      async function loadRecent() {
+        try {
+          const res = await fetch('/api/logs/recent?limit=1000');
+          const data = await res.json();
+          logsEl.innerHTML = '';
+          (data.logs || []).forEach(addLine);
+          oldestLoadedId = data.oldestReturnedId || null;
+          hasMoreOlder = !!data.hasMore;
+          olderBtn.disabled = !hasMoreOlder;
+          olderBtn.textContent = hasMoreOlder ? 'Load Older Logs' : 'No Older Logs';
+        } catch (err) {
+          addLine({ level: 'error', message: `Failed to load recent logs: ${err.message}`, timestamp: Date.now() });
+        }
+      }
+
+      async function loadOlder() {
+        if (!oldestLoadedId || !hasMoreOlder) return;
+        try {
+          olderBtn.disabled = true;
+          olderBtn.textContent = 'Loading...';
+          const res = await fetch(`/api/logs/recent?limit=500&beforeId=${oldestLoadedId}`);
+          const data = await res.json();
+          const older = data.logs || [];
+
+          if (older.length > 0) {
+            prependLines(older);
+            oldestLoadedId = data.oldestReturnedId || oldestLoadedId;
+          }
+
+          hasMoreOlder = !!data.hasMore;
+          olderBtn.disabled = !hasMoreOlder;
+          olderBtn.textContent = hasMoreOlder ? 'Load Older Logs' : 'No Older Logs';
+        } catch (err) {
+          olderBtn.disabled = false;
+          olderBtn.textContent = 'Load Older Logs';
+          addLine({ level: 'error', message: `Failed to load older logs: ${err.message}`, timestamp: Date.now() });
+        }
+      }
+
+      function connectStream() {
+        if (es) es.close();
+        es = new EventSource('/api/logs/stream');
+
+        es.onopen = () => setStatus(true);
+        es.onerror = () => setStatus(false);
+
+        es.onmessage = (ev) => {
+          try {
+            const payload = JSON.parse(ev.data);
+            if (payload.type === 'connected') return;
+            addLine(payload);
+          } catch {}
+        };
+      }
+
+      toggleAutoBtn.addEventListener('click', () => {
+        autoScroll = !autoScroll;
+        toggleAutoBtn.textContent = `Auto-scroll: ${autoScroll ? 'ON' : 'OFF'}`;
+      });
+
+      clearBtn.addEventListener('click', () => {
+        logsEl.innerHTML = '';
+        oldestLoadedId = null;
+        hasMoreOlder = true;
+        olderBtn.disabled = false;
+        olderBtn.textContent = 'Load Older Logs';
+      });
+
+      reloadBtn.addEventListener('click', loadRecent);
+      olderBtn.addEventListener('click', loadOlder);
+
+      loadRecent();
+      connectStream();
+    </script>
+  </body>
+</html>

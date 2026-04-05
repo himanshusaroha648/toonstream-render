@@ -5,6 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 import ProxyManager from "./proxy-manager.js";
 import fs from "fs";
 import path from "path";
+import { randomBytes } from "crypto";
 
 const REQUIRED_ENV = [
   "SUPABASE_URL",
@@ -19,12 +20,13 @@ if (missing.length) {
 }
 
 const supabase = createClient(
-  process.env.SUPL,
-  process.env.SUPABASE_SERVICE,
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
 
 const CONFIG = {
-  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstream.com/home/",
+  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstream.dad/home/",
+  episodeBaseUrl: process.env.TOONSTREAM_EPISODE_BASE_URL || "https://toonstream.live/",
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 60_000),
   requestTimeout: 30_000,
   maxRetries: 3,
@@ -148,6 +150,22 @@ const TOONSTREAM_ORIGIN = (() => {
   }
 })();
 
+const TOONSTREAM_EPISODE_ORIGIN = (() => {
+  try {
+    return new URL(CONFIG.episodeBaseUrl).origin;
+  } catch {
+    return "https://toonstream.live";
+  }
+})();
+
+const TOONSTREAM_EPISODE_HOST = (() => {
+  try {
+    return new URL(TOONSTREAM_EPISODE_ORIGIN).hostname.replace(/^www\./, "");
+  } catch {
+    return "toonstream.live";
+  }
+})();
+
 const CACHE_DIR = path.join(process.cwd(), "bin");
 const SERIES_CACHE_FILE = path.join(CACHE_DIR, "series_cache.json");
 const EPISODE_CACHE_FILE = path.join(CACHE_DIR, "episode_cache.json");
@@ -203,6 +221,19 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function generateRandomKey(length = 22) {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let out = "";
+  while (out.length < length) {
+    const bytes = randomBytes(length);
+    for (const value of bytes) {
+      out += chars[value % chars.length];
+      if (out.length >= length) break;
+    }
+  }
+  return out;
+}
+
 function getUA() {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
@@ -255,11 +286,31 @@ function normalizeUrl(rawUrl, base = CONFIG.homeUrl) {
   }
 }
 
+function forceToEpisodeDomain(rawUrl, base = TOONSTREAM_EPISODE_ORIGIN) {
+  const normalized = normalizeUrl(rawUrl, base);
+  if (!normalized) return null;
+
+  try {
+    const urlObj = new URL(normalized);
+    const host = urlObj.hostname.replace(/^www\./, "");
+    if (!host.includes("toonstream")) return normalized;
+
+    const targetOrigin = new URL(TOONSTREAM_EPISODE_ORIGIN);
+    urlObj.protocol = targetOrigin.protocol;
+    urlObj.hostname = targetOrigin.hostname;
+    urlObj.port = targetOrigin.port;
+
+    return urlObj.href;
+  } catch {
+    return normalized;
+  }
+}
+
 function isToonstreamUrl(url) {
-  if (!url || !TOONSTREAM_HOST) return false;
+  if (!url) return false;
   try {
     const hostname = new URL(url).hostname.replace(/^www\./, "");
-    return hostname === TOONSTREAM_HOST;
+    return hostname === TOONSTREAM_HOST || hostname === TOONSTREAM_EPISODE_HOST;
   } catch {
     return false;
   }
@@ -284,7 +335,7 @@ function deriveSeriesUrlFromEpisode(episodeUrl) {
     if (!episodeSlug) return null;
     const baseSlug = episodeSlug.replace(/-\d+x\d+$/i, "") || episodeSlug;
     const normalizedSlug = cleanSlug(baseSlug);
-    return `${TOONSTREAM_ORIGIN}/series/${normalizedSlug}/`;
+    return `${TOONSTREAM_EPISODE_ORIGIN}/series/${normalizedSlug}/`;
   } catch {
     return null;
   }
@@ -294,14 +345,14 @@ function buildSeriesUrlFromSlug(seriesSlug) {
   if (!seriesSlug) return null;
   const urlSlug =
     seriesSlug === "naruto-shippden" ? "naruto-shippuden" : seriesSlug;
-  return `${TOONSTREAM_ORIGIN}/series/${urlSlug}/`;
+  return `${TOONSTREAM_EPISODE_ORIGIN}/series/${urlSlug}/`;
 }
 
 function buildEpisodeUrl(seriesSlug, season, episode) {
   if (!seriesSlug) return null;
   const urlSlug =
     seriesSlug === "naruto-shippden" ? "naruto-shippuden" : seriesSlug;
-  return `${TOONSTREAM_ORIGIN}/episode/${urlSlug}-${season}x${episode}/`;
+  return `${TOONSTREAM_EPISODE_ORIGIN}/episode/${urlSlug}-${season}x${episode}/`;
 }
 
 function isValidEpisodeUrl(url) {
@@ -326,7 +377,14 @@ function buildRequestHeaders(url, options = {}) {
   if (options.headers) Object.assign(headers, options.headers);
   if (isToonstreamUrl(url)) {
     if (!headers.Referer) headers.Referer = CONFIG.homeUrl;
-    headers.Origin = TOONSTREAM_ORIGIN;
+    const reqOrigin = (() => {
+      try {
+        return new URL(url).origin;
+      } catch {
+        return TOONSTREAM_ORIGIN;
+      }
+    })();
+    headers.Origin = reqOrigin;
     headers["Sec-Fetch-Dest"] = "document";
     headers["Sec-Fetch-Mode"] = "navigate";
     headers["Sec-Fetch-Site"] = "same-origin";
@@ -488,35 +546,84 @@ async function getTMDBData(title, isMovie = false) {
 async function fetchTMDBEpisodeImage(tmdbId, seasonNum, episodeNum) {
   const apiKey = process.env.TMDB_API_KEY;
   if (!apiKey || !tmdbId) return null;
-  try {
-    const url = `${TMDB_BASE_URL}/tv/${tmdbId}/season/${seasonNum}/episode/${episodeNum}?api_key=${apiKey}&language=en-US`;
-    const response = await axios.get(url, { timeout: 10000 });
-    const data = response.data;
-    if (data && data.still_path) return `${TMDB_IMAGE_BASE}${data.still_path}`;
-    return null;
-  } catch (err) {
-    return null;
+  const url = `${TMDB_BASE_URL}/tv/${tmdbId}/season/${seasonNum}/episode/${episodeNum}?api_key=${apiKey}&language=en-US`;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await axios.get(url, { timeout: 10000 });
+      const data = response.data;
+      if (data && data.still_path) return `${TMDB_IMAGE_BASE}${data.still_path}`;
+      if (attempt === 3) return null;
+    } catch (err) {
+      if (attempt === 3) {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) return null;
+          const data = await res.json();
+          if (data?.still_path) return `${TMDB_IMAGE_BASE}${data.still_path}`;
+        } catch {
+          return null;
+        }
+      }
+      await delay(350 * attempt);
+    }
   }
+  return null;
 }
 
 async function fetchTMDBSeasonEpisodes(tmdbId, seasonNum) {
   const apiKey = process.env.TMDB_API_KEY;
   if (!apiKey || !tmdbId) return {};
-  try {
-    const url = `${TMDB_BASE_URL}/tv/${tmdbId}/season/${seasonNum}?api_key=${apiKey}&language=en-US`;
-    const response = await axios.get(url, { timeout: 15000 });
-    const data = response.data;
-    const episodeImages = {};
-    if (data && data.episodes && Array.isArray(data.episodes)) {
-      for (const ep of data.episodes) {
-        if (ep.still_path)
-          episodeImages[ep.episode_number] =
-            `${TMDB_IMAGE_BASE}${ep.still_path}`;
+  const url = `${TMDB_BASE_URL}/tv/${tmdbId}/season/${seasonNum}?api_key=${apiKey}&language=en-US`;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await axios.get(url, { timeout: 15000 });
+      const data = response.data;
+      const episodeImages = {};
+      if (data && data.episodes && Array.isArray(data.episodes)) {
+        for (const ep of data.episodes) {
+          if (ep.still_path)
+            episodeImages[ep.episode_number] =
+              `${TMDB_IMAGE_BASE}${ep.still_path}`;
+        }
       }
+      return episodeImages;
+    } catch (err) {
+      if (attempt === 3) {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) return {};
+          const data = await res.json();
+          const episodeImages = {};
+          if (Array.isArray(data?.episodes)) {
+            for (const ep of data.episodes) {
+              if (ep.still_path)
+                episodeImages[ep.episode_number] =
+                  `${TMDB_IMAGE_BASE}${ep.still_path}`;
+            }
+          }
+          return episodeImages;
+        } catch {
+          return {};
+        }
+      }
+      await delay(350 * attempt);
     }
-    return episodeImages;
-  } catch (err) {
-    return {};
+  }
+  return {};
+}
+
+async function fetchTMDBTitleById(tmdbId) {
+  const apiKey = process.env.TMDB_API_KEY;
+  if (!apiKey || !tmdbId) return null;
+  try {
+    const url = `${TMDB_BASE_URL}/tv/${tmdbId}?api_key=${apiKey}&language=en-US`;
+    const response = await axios.get(url, { timeout: 10000 });
+    const data = response.data;
+    return data?.name || data?.original_name || data?.title || null;
+  } catch {
+    return null;
   }
 }
 
@@ -577,7 +684,7 @@ function parseEpisodeCode(url) {
     const u = new URL(url);
     const parts = u.pathname.split("/").filter(Boolean);
     const slug = parts[parts.length - 1];
-    const match = slug.match(/-(\d+)x(\d+)\/?$/);
+    const match = slug.match(/-(\d+)x(\d+)(?:\/?|#.*)?$/i);
     if (match)
       return {
         season: parseInt(match[1], 10),
@@ -632,27 +739,97 @@ function getAjaxUrl(pageUrl) {
 }
 
 function getHomeAjaxUrl(pageUrl, pageHtml) {
-  // First: try to extract ajax_url from the page's inline JS (most reliable)
+  const explicitSeasonApi = process.env.TOONSTREAM_SEASON_API_URL;
+  if (explicitSeasonApi) return explicitSeasonApi;
+
   if (pageHtml) {
-    const m =
-      pageHtml.match(/['""]?ajax_url['""]?\s*[:=]\s*['""]([^'""]+)['""]/) ||
-      pageHtml.match(/admin-ajax\.php['""]?/i);
-    if (m && m[1] && m[1].startsWith("http")) {
-      return m[1].trim();
-    }
-    // Direct regex for full URL
-    const fullMatch = pageHtml.match(
-      /(https?:\/\/[^/]+\/(?:home\/)?wp-admin\/admin-ajax\.php)/i,
+    const seasonApiMatch = pageHtml.match(
+      /(https?:\/\/[^"'\s]+\/fetch_episodes\.php)/i,
     );
-    if (fullMatch) return fullMatch[1];
+    if (seasonApiMatch?.[1]) return seasonApiMatch[1];
   }
-  // Fallback: use page URL's domain with /home/ prefix
-  try {
-    const u = new URL(pageUrl || CONFIG.homeUrl);
-    return `${u.origin}/home/wp-admin/admin-ajax.php`;
-  } catch {
-    return CONFIG.ajaxUrl;
+
+  return `${TOONSTREAM_EPISODE_ORIGIN}/fetch_episodes.php`;
+}
+
+function extractEpisodesFromSeasonApiResponse(data, season, pageUrl) {
+  const episodes = [];
+  const seen = new Set();
+
+  const pushEpisode = (rawUrl, fallbackTitle = "") => {
+    const url = forceToEpisodeDomain(
+      rawUrl,
+      pageUrl || TOONSTREAM_EPISODE_ORIGIN,
+    );
+    if (!url || !url.includes("/episode/")) return;
+
+    const code = parseEpisodeCode(url);
+    if (!code?.episode) return;
+
+    const key = `${code.season}x${code.episode}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    episodes.push({
+      season: code.season || parseInt(season, 10),
+      episode: code.episode,
+      url,
+      title: fallbackTitle,
+    });
+  };
+
+  if (typeof data === "string") {
+    const $ = cheerio.load(data);
+
+    $("article a[href*='/episode/'], a[href*='/episode/']").each((_, el) => {
+      const anchor = $(el);
+      const href = anchor.attr("href");
+      const title = anchor.attr("title") || anchor.text().trim() || "";
+      pushEpisode(href, title);
+    });
+
+    if (episodes.length > 0) return episodes;
+
+    for (const match of data.matchAll(/https?:\/\/[^"'\s]*\/episode\/[^"'\s]+/gi)) {
+      pushEpisode(match[0]);
+    }
+
+    return episodes;
   }
+
+  if (Array.isArray(data)) {
+    data.forEach((item) => {
+      pushEpisode(item?.url || item?.link || item?.episode_url, item?.title || "");
+    });
+    return episodes;
+  }
+
+  if (data && typeof data === "object") {
+    const candidates = [
+      data.html,
+      data.data,
+      data.episodes,
+      data.results,
+      data.items,
+    ];
+
+    for (const candidate of candidates) {
+      const partial = extractEpisodesFromSeasonApiResponse(
+        candidate,
+        season,
+        pageUrl,
+      );
+      partial.forEach((ep) => {
+        const key = `${ep.season}x${ep.episode}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          episodes.push(ep);
+        }
+      });
+    }
+  }
+
+  return episodes;
 }
 
 async function fetchEpisodeDataFromAPI(
@@ -668,65 +845,33 @@ async function fetchEpisodeDataFromAPI(
   // Extract AJAX URL from page HTML first (handles cross-domain like toonstream.one → toonstream.dad)
   const ajaxUrl = getHomeAjaxUrl(pageUrl, pageHtml);
   console.log(
-    `         🌐 Season ${season} API: POST ${ajaxUrl} [post=${postId}]`,
+    `         🌐 Season ${season} API: GET ${ajaxUrl}?post=${postId}&season=${season}`,
   );
 
   try {
-    const params = new URLSearchParams();
-    params.append("action", "action_select_season");
-    params.append("season", season);
-    params.append("post", postId);
-    if (nonce) params.append("nonce", nonce);
-
-    const res = await axios.post(ajaxUrl, params, {
+    const res = await axios.get(ajaxUrl, {
+      params: {
+        post: postId,
+        season,
+      },
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
         Referer: referer,
-        "X-Requested-With": "XMLHttpRequest",
         "User-Agent": getUA(),
+        Accept: "application/json,text/html,*/*",
       },
       timeout: 15000,
     });
 
-    const responseHtml =
-      typeof res.data === "string"
-        ? res.data
-        : res.data?.html || JSON.stringify(res.data);
-    const $ = cheerio.load(responseHtml);
-    const episodes = [];
-
-    // Episode articles from season API response
-    // URL may contain /home/ prefix e.g. toonstream.dad/home/episode/slug-2x1/
-    $("article").each((_, el) => {
-      const art = $(el);
-      const anchor = art.find('a[href*="/episode/"]').first();
-      const href = anchor.attr("href");
-      if (!href) return;
-
-      // Parse season/episode from URL (handles /home/ prefix too)
-      const code = parseEpisodeCode(href);
-      let epNum = code?.episode;
-      let snNum = code?.season || parseInt(season);
-
-      // Also try num-epi span like "2x1"
-      if (!epNum) {
-        const numText = art.find(".num-epi").text().trim(); // e.g. "2x1"
-        const m = numText.match(/(\d+)x(\d+)/i);
-        if (m) {
-          snNum = parseInt(m[1]);
-          epNum = parseInt(m[2]);
-        }
-      }
-
-      if (epNum) {
-        episodes.push({
-          season: snNum,
-          episode: epNum,
-          url: href,
-          title: art.find(".entry-title, .title").text().trim(),
-        });
-      }
-    });
+    const episodes = extractEpisodesFromSeasonApiResponse(
+      res.data,
+      season,
+      pageUrl,
+    );
+    if (episodes.length > 0) {
+      console.log(
+        `         ✓ Season ${season}: ${episodes.length} episodes parsed from fetch_episodes API`,
+      );
+    }
     return episodes;
   } catch (err) {
     console.warn(
@@ -843,11 +988,32 @@ async function extractEmbeds(html, episodeUrl) {
   const seen = new Set();
 
   try {
+    const $ = cheerio.load(html);
+
+    $("a.myservers[data-src], a[data-src]").each((index, el) => {
+      const rawSrc = $(el).attr("data-src");
+      const resolved = normalizeUrl(rawSrc, episodeUrl);
+      if (!resolved || seen.has(resolved)) return;
+
+      const label = $(el).text().trim();
+      seen.add(resolved);
+      embeds.push({
+        option: embeds.length + 1,
+        real_video: resolved,
+        label: label || `Server ${index + 1}`,
+      });
+    });
+
+    if (embeds.length > 0) {
+      console.log(`            🔌 Found ${embeds.length} server URL(s) from data-src`);
+      return embeds;
+    }
+
     const pageOrigin = (() => {
       try {
         return new URL(episodeUrl).origin;
       } catch {
-        return TOONSTREAM_ORIGIN;
+        return TOONSTREAM_EPISODE_ORIGIN;
       }
     })();
 
@@ -863,7 +1029,9 @@ async function extractEmbeds(html, episodeUrl) {
       ),
     ];
     for (const m of rawMatches) {
-      const url = m[1].replace(/&#038;/g, "&").replace(/&amp;/g, "&");
+      const rawUrl = m[1].replace(/&#038;/g, "&").replace(/&amp;/g, "&");
+      const url = forceToEpisodeDomain(rawUrl, TOONSTREAM_EPISODE_ORIGIN);
+      if (!url) continue;
       if (!trembedSeenKeys.has(url)) {
         trembedSeenKeys.add(url);
         trembedUrls.push(url);
@@ -891,7 +1059,7 @@ async function extractEmbeds(html, episodeUrl) {
       }
       let idx = 0;
       for (const { trid, trtype } of pairs.values()) {
-        const url = `${pageOrigin}/home/?trembed=${idx}&trid=${trid}&trtype=${trtype}`;
+        const url = `${TOONSTREAM_EPISODE_ORIGIN}/?trembed=${idx}&trid=${trid}&trtype=${trtype}`;
         trembedUrls.push(url);
         idx++;
       }
@@ -963,6 +1131,18 @@ async function syncEpisodeByUrl(url, options = {}) {
       updated_at: now,
     };
 
+    if (savePayload.thumbnail) {
+      const normalizedImage = savePayload.thumbnail;
+      savePayload.episode_main_poster =
+        savePayload.episode_main_poster || normalizedImage;
+      savePayload.episode_card_thumbnail =
+        savePayload.episode_card_thumbnail || normalizedImage;
+      savePayload.episode_list_thumbnail =
+        savePayload.episode_list_thumbnail || normalizedImage;
+      savePayload.video_player_thumbnail =
+        savePayload.video_player_thumbnail || normalizedImage;
+    }
+
     // Never overwrite existing servers with an empty array
     if (!episodePayload.servers || episodePayload.servers.length === 0) {
       delete savePayload.servers;
@@ -977,6 +1157,26 @@ async function syncEpisodeByUrl(url, options = {}) {
     if (error) throw error;
 
     console.log(`         ✅ DB saved: S${code.season}E${code.episode} [${seriesCtx.slug}] at ${now}`);
+
+    if (savePayload.thumbnail) {
+      const imageValue = savePayload.thumbnail;
+      const { error: imgErr } = await supabase
+        .from("episodes")
+        .update({
+          episode_main_poster: imageValue,
+          episode_card_thumbnail: imageValue,
+          episode_list_thumbnail: imageValue,
+          video_player_thumbnail: imageValue,
+        })
+        .eq("series_slug", seriesCtx.slug)
+        .eq("season", code.season)
+        .eq("episode", code.episode);
+      if (imgErr) {
+        console.warn(
+          `         ⚠️ Episode image normalize failed: ${imgErr.message}`,
+        );
+      }
+    }
 
     // Also save to latest_episodes table so new/updated episodes appear in latest feeds
     const { error: latestErr } = await supabase
@@ -1000,8 +1200,7 @@ async function syncEpisodeByUrl(url, options = {}) {
     }
 
     // Update series random_key so frontend cache is invalidated for this series
-    const newRandomKey = Math.random().toString(36).substring(2, 15) +
-      Math.random().toString(36).substring(2, 15);
+    const newRandomKey = generateRandomKey();
     const { error: rkErr } = await supabase
       .from("series")
       .update({ random_key: newRandomKey, updated_at: now })
@@ -1040,6 +1239,8 @@ async function buildEpisodeRecord(episodeUrl, hints = {}) {
     parseEpisodeCode(episodeUrl) || { season: 1, episode: 1 };
   const embeds = await extractEmbeds(episodeHtml, episodeUrl);
   let tmdbEpisodeImage = null;
+  let tmdbTitleFromId = null;
+  let imageSource = "none";
   if (seriesCtx.tmdb_id && process.env.TMDB_API_KEY) {
     const cacheKey = `${seriesCtx.tmdb_id}-${code.season}`;
     if (!tmdbEpisodeImageCache.has(cacheKey)) {
@@ -1047,7 +1248,9 @@ async function buildEpisodeRecord(episodeUrl, hints = {}) {
         seriesCtx.tmdb_id,
         code.season,
       );
-      tmdbEpisodeImageCache.set(cacheKey, seasonImages);
+      if (Object.keys(seasonImages).length > 0) {
+        tmdbEpisodeImageCache.set(cacheKey, seasonImages);
+      }
     }
     const cachedImages = tmdbEpisodeImageCache.get(cacheKey) || {};
     tmdbEpisodeImage = cachedImages[code.episode];
@@ -1062,17 +1265,54 @@ async function buildEpisodeRecord(episodeUrl, hints = {}) {
         tmdbEpisodeImageCache.set(cacheKey, cachedImages);
       }
     }
+    if (tmdbEpisodeImage) imageSource = `tmdb:${seriesCtx.tmdb_id}`;
   }
+
   if (!tmdbEpisodeImage) {
-    const tvdbId = await searchTVDBSeries(seriesCtx.title);
-    if (tvdbId)
+    if (seriesCtx.tmdb_id) {
+      tmdbTitleFromId = await fetchTMDBTitleById(seriesCtx.tmdb_id);
+      if (tmdbTitleFromId) {
+        console.log(
+          `         🔎 TMDB image missing; trying TVDB with TMDB title: ${tmdbTitleFromId}`,
+        );
+      }
+    }
+
+    const tvdbSearchTitle = tmdbTitleFromId || seriesCtx.title || hints.seriesTitle;
+    const tvdbId = tvdbSearchTitle ? await searchTVDBSeries(tvdbSearchTitle) : null;
+
+    if (!tvdbId && seriesCtx.title && tvdbSearchTitle !== seriesCtx.title) {
+      console.log(`         🔎 TVDB retry with series title: ${seriesCtx.title}`);
+      const retryTvdbId = await searchTVDBSeries(seriesCtx.title);
+      if (retryTvdbId)
+        tmdbEpisodeImage = await fetchTVDBEpisodeImage(
+          retryTvdbId,
+          code.season,
+          code.episode,
+        );
+    }
+
+    if (tvdbId && !tmdbEpisodeImage)
       tmdbEpisodeImage = await fetchTVDBEpisodeImage(
         tvdbId,
         code.season,
         code.episode,
       );
+    if (tmdbEpisodeImage && imageSource === "none") imageSource = "tvdb";
   }
-  const bestImage = tmdbEpisodeImage || seriesCtx.tmdb_poster || null;
+  const bestImage =
+    tmdbEpisodeImage ||
+    seriesCtx.poster ||
+    seriesCtx.banner_image ||
+    null;
+  if (!tmdbEpisodeImage && bestImage) imageSource = "series-fallback";
+  if (bestImage) {
+    console.log(
+      `         🖼️ Episode image source: ${imageSource} (S${code.season}E${code.episode})`,
+    );
+  } else {
+    console.log(`         ⚠️ Episode image source: none (S${code.season}E${code.episode})`);
+  }
   const episodePayload = {
     title: meta.title || hints.card?.title || `Episode ${code.episode}`,
     thumbnail: bestImage,
@@ -1095,7 +1335,10 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
   // Memory cache hit
   if (seriesCache.has(finalSlug)) {
     const cached = seriesCache.get(finalSlug);
-    if (!cached.isMovie) return cached; // Only use if it's confirmed a series
+    if (!cached.isMovie) {
+      if (cached.tmdb_id) return cached; // Use series cache only when tmdb_id is present
+      seriesCache.delete(finalSlug); // stale/incomplete cache, refresh from DB
+    }
     if (isMovieUrl) return cached;      // URL is movie — use movie cache
     // Was cached as movie but URL is series — clear cache and re-resolve
     seriesCache.delete(finalSlug);
@@ -1103,14 +1346,18 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
 
   if (localSeriesCache[finalSlug] && !localSeriesCache[finalSlug].isMovie) {
     const cached = localSeriesCache[finalSlug];
-    const ctx = {
-      ...cached,
-      url: seriesUrl,
-      sourceSlug: rawSlug,
-      isMovie: false,
-    };
-    seriesCache.set(finalSlug, ctx);
-    return ctx;
+    if (cached.tmdb_id) {
+      const ctx = {
+        ...cached,
+        url: seriesUrl,
+        sourceSlug: rawSlug,
+        isMovie: false,
+      };
+      seriesCache.set(finalSlug, ctx);
+      return ctx;
+    }
+    delete localSeriesCache[finalSlug];
+    saveCache(SERIES_CACHE_FILE, localSeriesCache);
   }
 
   // Check series table first
@@ -1121,6 +1368,16 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
     .maybeSingle();
 
   if (seriesData) {
+    if (!seriesData.random_key) {
+      const missingKey = generateRandomKey();
+      await supabase
+        .from("series")
+        .update({ random_key: missingKey, updated_at: new Date().toISOString() })
+        .eq("slug", finalSlug);
+      seriesData.random_key = missingKey;
+      console.log(`   🔑 Added missing random_key: [${finalSlug}] → ${missingKey}`);
+    }
+
     const ctx = { ...seriesData, url: seriesUrl, sourceSlug: rawSlug, isMovie: false };
     seriesCache.set(finalSlug, ctx);
     localSeriesCache[finalSlug] = { ...seriesData, isMovie: false };
@@ -1184,7 +1441,7 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
   else {
     payload.total_seasons = tmdbData?.total_seasons || 1;
     payload.total_episodes = tmdbData?.total_episodes || null;
-    payload.random_key = Math.random().toString(36).substring(2, 15);
+    payload.random_key = generateRandomKey();
   }
   const { error: seriesUpsertError } = await supabase
     .from(targetTable)
@@ -1237,12 +1494,73 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
     console.log(`      🔍 Fetching series data: ${seriesUrl}`);
 
     const html = await fetchHtmlWithRetry(seriesUrl);
-    const postId = extractPostId(html);
+    let postId = extractPostId(html);
     const nonce = extractNonce(html);
-    const seasons = extractSeasonNumbers(html);
+    let seasons = extractSeasonNumbers(html);
 
     // Fallback: Extract episodes from HTML if API might fail or to have a backup
-    const htmlEpisodeLinks = extractSeriesEpisodeLinks(html, seriesUrl);
+    let htmlEpisodeLinks = extractSeriesEpisodeLinks(html, seriesUrl);
+
+    if ((!postId || htmlEpisodeLinks.length === 0) && triggeringEpisode?.url) {
+      const triggerUrl = forceToEpisodeDomain(triggeringEpisode.url, seriesUrl);
+      if (triggerUrl) {
+        console.log(
+          `      🔁 Enriching series metadata from trigger episode page: ${triggerUrl}`,
+        );
+        try {
+          const triggerHtml = await fetchHtmlWithRetry(triggerUrl, CONFIG.maxRetries, {
+            referer: seriesUrl,
+          });
+
+          const triggerPostId = extractPostId(triggerHtml);
+          if (!postId && triggerPostId) {
+            postId = triggerPostId;
+            console.log(`      ✅ postId resolved from trigger page: ${postId}`);
+          }
+
+          const triggerSeasons = extractSeasonNumbers(triggerHtml);
+          if (triggerSeasons.length > 0) {
+            const combined = new Set([...(seasons || []), ...triggerSeasons]);
+            seasons = Array.from(combined).sort((a, b) => a - b);
+          }
+
+          const triggerEpisodeLinks = extractSeriesEpisodeLinks(
+            triggerHtml,
+            seriesUrl,
+          );
+          if (triggerEpisodeLinks.length > 0) {
+            const seen = new Set(
+              htmlEpisodeLinks.map((ep) => `${ep.season}x${ep.episode}`),
+            );
+            for (const ep of triggerEpisodeLinks) {
+              const key = `${ep.season}x${ep.episode}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              htmlEpisodeLinks.push(ep);
+            }
+          }
+        } catch (err) {
+          console.warn(
+            `      ⚠️ Trigger-page metadata fallback failed: ${err.message}`,
+          );
+        }
+      }
+    }
+
+    if (
+      triggeringEpisode?.season &&
+      !seasons.includes(Number(triggeringEpisode.season))
+    ) {
+      seasons.push(Number(triggeringEpisode.season));
+      seasons.sort((a, b) => a - b);
+    }
+
+    if (!postId) {
+      console.warn(
+        `      ⚠️ postId not found for ${seriesCtx.slug}; season API may fail for all seasons`,
+      );
+    }
+
     const htmlUrlMap = new Map();
     htmlEpisodeLinks.forEach((ep) => {
       const key = `${ep.season}x${ep.episode}`;
@@ -1350,16 +1668,33 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
     }
 
     let processCount = 0;
+    let checkedCount = 0;
+    let skippedCount = 0;
+    let foundTriggerInSeries = false;
     for (const ep of allEpisodeLinks) {
+      checkedCount++;
       const key = makeSeasonEpisodeKey(ep.season, ep.episode);
+      const existsInDb = existingEpisodes.has(key);
       const isTriggering =
         triggeringEpisode &&
         ep.season === triggeringEpisode.season &&
         ep.episode === triggeringEpisode.episode;
       const shouldBackfill = seasonsToBackfill.has(ep.season);
 
-      if (!existingEpisodes.has(key) || isTriggering || shouldBackfill) {
+      if (isTriggering) {
+        foundTriggerInSeries = true;
+      }
+
+      if (isTriggering || !existsInDb) {
         processCount++;
+        let reason = "missing-in-db";
+        if (isTriggering && existsInDb) reason = "trigger-latest-refetch";
+        else if (isTriggering && !existsInDb) reason = "trigger-new-episode";
+
+        console.log(
+          `      🔎 CHECK S${ep.season}E${ep.episode} -> SYNC (${reason})`,
+        );
+
         if (isTriggering && existingEpisodes.has(key)) {
           console.log(
             `      🔄 Re-fetching latest episode: S${ep.season}E${ep.episode} (even though it exists)`,
@@ -1367,15 +1702,58 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
         } else {
           console.log(`      📺 Syncing: S${ep.season}E${ep.episode}`);
         }
-        await syncEpisodeByUrl(ep.url, {
+        const syncUrl = isTriggering
+          ? forceToEpisodeDomain(triggeringEpisode?.url || ep.url, seriesUrl)
+          : ep.url;
+
+        await syncEpisodeByUrl(syncUrl, {
           seriesUrl,
           seriesTitle: seriesCtx.title,
           seriesSlug: seriesCtx.slug,
           force: true,
           code: { season: ep.season, episode: ep.episode },
         });
+      } else {
+        skippedCount++;
+        const skipReason = shouldBackfill
+          ? "already-in-db-backfill-skip"
+          : "already-in-db";
+        console.log(
+          `      🔎 CHECK S${ep.season}E${ep.episode} -> SKIP (${skipReason})`,
+        );
       }
     }
+
+    if (triggeringEpisode && !foundTriggerInSeries) {
+      console.warn(
+        `      ⚠️ Trigger episode S${triggeringEpisode.season}E${triggeringEpisode.episode} not found in fetched episode list`,
+      );
+
+      const fallbackTriggerUrl = forceToEpisodeDomain(
+        triggeringEpisode.url,
+        seriesUrl,
+      );
+      if (fallbackTriggerUrl) {
+        console.log(
+          `      🔁 Fallback trigger sync via URL: ${fallbackTriggerUrl}`,
+        );
+        await syncEpisodeByUrl(fallbackTriggerUrl, {
+          seriesUrl,
+          seriesTitle: seriesCtx.title,
+          seriesSlug: seriesCtx.slug,
+          force: true,
+          code: {
+            season: triggeringEpisode.season,
+            episode: triggeringEpisode.episode,
+          },
+        });
+        processCount++;
+      }
+    }
+
+    console.log(
+      `      📌 Episode check summary: checked=${checkedCount}, synced=${processCount}, skipped=${skippedCount}`,
+    );
 
     if (processCount === 0) {
       console.log(
@@ -1408,6 +1786,18 @@ async function updateSeriesFromLatestEpisodes(latestSeriesMap) {
       console.log(
         `\n   📺 Processing: ${seriesTitle} (triggered by S${triggeringEpisode.season}E${triggeringEpisode.episode})`,
       );
+      if (triggeringEpisode?.sourceUrl || triggeringEpisode?.url) {
+        console.log(
+          `   🔗 Trigger episode URL: ${triggeringEpisode.sourceUrl || triggeringEpisode.url}`,
+        );
+      }
+      if (
+        triggeringEpisode?.sourceUrl &&
+        triggeringEpisode?.url &&
+        triggeringEpisode.sourceUrl !== triggeringEpisode.url
+      ) {
+        console.log(`   🔁 Trigger URL converted: ${triggeringEpisode.url}`);
+      }
 
       await ensureSeriesComplete(
         { slug, title: seriesTitle, url: buildSeriesUrlFromSlug(slug) },
@@ -1436,11 +1826,23 @@ async function main() {
       stats.skippedEpisodes++;
       continue;
     }
-    const seriesUrl = deriveSeriesUrlFromEpisode(card.url);
+    const sourceEpisodeUrl = normalizeUrl(card.url, CONFIG.homeUrl);
+    const liveEpisodeUrl = forceToEpisodeDomain(sourceEpisodeUrl, CONFIG.homeUrl);
+    const seriesUrl = deriveSeriesUrlFromEpisode(liveEpisodeUrl || card.url);
     const slug = extractSeriesSlugFromUrl(seriesUrl);
     if (slug) {
       if (!latestSeriesMap.has(slug)) {
-        latestSeriesMap.set(slug, code);
+        latestSeriesMap.set(slug, {
+          season: code.season,
+          episode: code.episode,
+          sourceUrl: sourceEpisodeUrl,
+          url: liveEpisodeUrl,
+        });
+        if (sourceEpisodeUrl && liveEpisodeUrl && sourceEpisodeUrl !== liveEpisodeUrl) {
+          console.log(
+            `   🔁 Trigger URL mapped: ${sourceEpisodeUrl} -> ${liveEpisodeUrl}`,
+          );
+        }
       }
     }
   }
