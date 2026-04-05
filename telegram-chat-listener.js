@@ -8,7 +8,7 @@ const apiId = Number(process.env.TELEGRAM_API_ID || process.env.API_ID);
 const apiHash = process.env.TELEGRAM_API_HASH || process.env.API_HASH;
 const sessionString =
   process.env.TELEGRAM_SESSION || process.env.telegram_Session || "";
-const targetChatId = process.env.TELEGRAM_CHAT_ID || "-1003404540307";
+const targetChatId = process.env.TELEGRAM_CHAT_ID || "-1003358753323";
 
 if (!apiId || !apiHash) {
   console.error(
