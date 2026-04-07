@@ -27,6 +27,10 @@ const supabase = createClient(
 const CONFIG = {
   homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstream.dad/home/",
   episodeBaseUrl: process.env.TOONSTREAM_EPISODE_BASE_URL || "https://toonstream.live/",
+  homeRetryDelaysMs: (process.env.HOME_RETRY_DELAYS_MS || "20000,40000,120000")
+    .split(",")
+    .map((v) => Number(v.trim()))
+    .filter((v) => Number.isFinite(v) && v > 0),
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 60_000),
   requestTimeout: 30_000,
   maxRetries: 3,
@@ -438,6 +442,39 @@ async function fetchHtmlWithRetry(
   throw new Error(
     `Failed to fetch ${url}: ${lastErr?.message || "unknown error"}`,
   );
+}
+
+async function fetchHomeHtmlWithBackoff() {
+  const delays = CONFIG.homeRetryDelaysMs;
+  const maxAttempts = delays.length + 1;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      // Keep per-attempt fetch strict to avoid fast triple-retry spam on 403.
+      return await fetchHtmlWithRetry(CONFIG.homeUrl, 1);
+    } catch (err) {
+      lastError = err;
+      const delayMs = delays[attempt - 1];
+      if (!delayMs) break;
+
+      const status = err?.response?.status;
+      const delaySec = Math.round(delayMs / 1000);
+      if (status) {
+        console.warn(
+          `  ⚠️ Home fetch failed (${status}) [attempt ${attempt}/${maxAttempts}] - retrying in ${delaySec}s...`,
+        );
+      } else {
+        console.warn(
+          `  ⚠️ Home fetch failed [attempt ${attempt}/${maxAttempts}] - retrying in ${delaySec}s...`,
+        );
+      }
+
+      await delay(delayMs);
+    }
+  }
+
+  throw lastError || new Error(`Failed to fetch ${CONFIG.homeUrl}`);
 }
 
 function cleanTitleForTMDB(title) {
@@ -1814,7 +1851,7 @@ async function main() {
   console.log(`🚀 Toonstream -> Supabase sync started`);
   console.log(`📡 Fetching latest episodes from Toonstream...`);
 
-  const html = await fetchHtmlWithRetry(CONFIG.homeUrl);
+  const html = await fetchHomeHtmlWithBackoff();
   const cards = extractEpisodeCards(html);
   console.log(`🔍 Found ${cards.length} candidate episodes`);
 
