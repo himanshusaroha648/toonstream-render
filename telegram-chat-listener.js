@@ -9,6 +9,9 @@ const apiHash = process.env.TELEGRAM_API_HASH || process.env.API_HASH;
 const sessionString =
   process.env.TELEGRAM_SESSION || process.env.telegram_Session || "";
 const targetChatId = process.env.TELEGRAM_CHAT_ID || "-1003404540307";
+const localPort = Number(process.env.PORT || 5000);
+const syncTriggerUrl =
+  process.env.SYNC_TRIGGER_URL || `http://127.0.0.1:${localPort}/sync`;
 
 if (!apiId || !apiHash) {
   console.error(
@@ -33,7 +36,58 @@ let syncRunning = false;
 let pendingMessage = null;
 const handledMessageIds = new Set();
 
-function runSyncScript(triggerMessage) {
+function runDirectSyncScript() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["toonstream-supabase-sync.js"], {
+      cwd: process.cwd(),
+      stdio: "inherit",
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) return resolve();
+      reject(new Error(`Sync run exited with code ${code}`));
+    });
+
+    child.on("error", (err) => {
+      reject(err);
+    });
+  });
+}
+
+async function triggerSyncViaServer() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch(syncTriggerUrl, {
+      method: "GET",
+      signal: controller.signal,
+      headers: { Accept: "application/json" },
+    });
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      throw new Error(`sync endpoint error: HTTP ${response.status}`);
+    }
+
+    if (payload?.status === "already_running") {
+      console.log("⏳ Server sync already running. Trigger acknowledged.");
+      return;
+    }
+
+    console.log("✅ Server sync trigger accepted.");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function runSyncScript(triggerMessage) {
   const messageId = triggerMessage?.id;
   if (!messageId) {
     console.log("⏭️ Invalid message received. Sync not triggered.");
@@ -61,41 +115,31 @@ function runSyncScript(triggerMessage) {
   }
 
   console.log(
-    `🚀 Triggering sync for message ${messageId}: toonstream-supabase-sync.js`,
+    `🚀 Triggering sync for message ${messageId} via ${syncTriggerUrl}`,
   );
 
-  const child = spawn(process.execPath, ["toonstream-supabase-sync.js"], {
-    cwd: process.cwd(),
-    stdio: "inherit",
-  });
-
-  child.on("close", (code) => {
-    syncRunning = false;
-    if (code === 0) {
-      console.log("✅ Sync run completed successfully.");
-    } else {
-      console.error(`❌ Sync run exited with code ${code}`);
+  try {
+    await triggerSyncViaServer();
+  } catch (err) {
+    console.warn(
+      "⚠️ Could not trigger /sync endpoint, falling back to direct sync script:",
+      err?.message || err,
+    );
+    try {
+      await runDirectSyncScript();
+      console.log("✅ Direct sync run completed successfully.");
+    } catch (directErr) {
+      console.error("❌ Direct sync run failed:", directErr?.message || directErr);
     }
-
+  } finally {
+    syncRunning = false;
     if (pendingMessage) {
       const nextMessage = pendingMessage;
       pendingMessage = null;
       console.log(`🔁 Processing queued message ${nextMessage.id}...`);
-      runSyncScript(nextMessage);
+      await runSyncScript(nextMessage);
     }
-  });
-
-  child.on("error", (err) => {
-    syncRunning = false;
-    console.error("❌ Failed to start sync script:", err?.message || err);
-
-    if (pendingMessage) {
-      const nextMessage = pendingMessage;
-      pendingMessage = null;
-      console.log(`🔁 Retrying with queued message ${nextMessage.id}...`);
-      runSyncScript(nextMessage);
-    }
-  });
+  }
 }
 
 function sameChat(inputId, configuredId) {
@@ -154,7 +198,7 @@ async function startListener() {
       printMessage(`🆕 New message received in ${targetChatId}`, message);
 
       console.log("🎯 New channel message detected. Triggering sync...");
-      runSyncScript(message);
+      void runSyncScript(message);
     },
     new NewMessage({}),
   );
