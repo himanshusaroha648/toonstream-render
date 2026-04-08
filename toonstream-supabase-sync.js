@@ -25,7 +25,7 @@ const supabase = createClient(
 );
 
 const CONFIG = {
-  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstream.dad/home/",
+  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstram-home.chanchalsaroha8950.workers.dev/api/home",
   episodeBaseUrl: process.env.TOONSTREAM_EPISODE_BASE_URL || "https://toonstream.live/",
   homeRetryDelaysMs: (process.env.HOME_RETRY_DELAYS_MS || "20000,40000,120000")
     .split(",")
