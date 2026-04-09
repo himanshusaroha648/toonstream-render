@@ -11,8 +11,13 @@ const AUTO_SYNC_ON_START = process.env.AUTO_SYNC_ON_START === "true";
 const ENABLE_CRON_SYNC = process.env.ENABLE_CRON_SYNC === "true";
 const ENABLE_TELEGRAM_TRIGGER =
   process.env.ENABLE_TELEGRAM_TRIGGER !== "false";
+const TELEGRAM_RESTART_DELAY_MS = Number(
+  process.env.TELEGRAM_RESTART_DELAY_MS || 5000,
+);
 
 let telegramListenerProcess = null;
+let telegramRestartTimer = null;
+let shuttingDown = false;
 
 const LOG_BUFFER_LIMIT = Number(process.env.LOG_BUFFER_LIMIT || 2000);
 const logBuffer = [];
@@ -526,6 +531,8 @@ function updateNextRunTime() {
 }
 
 function startTelegramListener() {
+  if (shuttingDown) return;
+
   if (!ENABLE_TELEGRAM_TRIGGER) {
     console.log("ℹ️ Telegram trigger listener is disabled (ENABLE_TELEGRAM_TRIGGER=false)");
     return;
@@ -546,6 +553,15 @@ function startTelegramListener() {
   telegramListenerProcess.on("close", (code) => {
     console.log(`⚠️ Telegram listener exited with code ${code}`);
     telegramListenerProcess = null;
+
+    if (!shuttingDown && ENABLE_TELEGRAM_TRIGGER) {
+      if (telegramRestartTimer) clearTimeout(telegramRestartTimer);
+      telegramRestartTimer = setTimeout(() => {
+        telegramRestartTimer = null;
+        console.log("🔁 Restarting telegram listener...");
+        startTelegramListener();
+      }, TELEGRAM_RESTART_DELAY_MS);
+    }
   });
 
   telegramListenerProcess.on("error", (err) => {
@@ -555,6 +571,13 @@ function startTelegramListener() {
 }
 
 function stopTelegramListener() {
+  shuttingDown = true;
+
+  if (telegramRestartTimer) {
+    clearTimeout(telegramRestartTimer);
+    telegramRestartTimer = null;
+  }
+
   if (!telegramListenerProcess) return;
   try {
     telegramListenerProcess.kill("SIGINT");

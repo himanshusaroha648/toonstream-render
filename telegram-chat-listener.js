@@ -8,10 +8,12 @@ const apiId = Number(process.env.TELEGRAM_API_ID || process.env.API_ID);
 const apiHash = process.env.TELEGRAM_API_HASH || process.env.API_HASH;
 const sessionString =
   process.env.TELEGRAM_SESSION || process.env.telegram_Session || "";
-const targetChatId = process.env.TELEGRAM_CHAT_ID || "-1003358753323";
+const targetChatId = process.env.TELEGRAM_CHAT_ID || "-1003404540307";
 const localPort = Number(process.env.PORT || 5000);
 const syncTriggerUrl =
   process.env.SYNC_TRIGGER_URL || `http://127.0.0.1:${localPort}/sync`;
+const pollIntervalMs = Number(process.env.TELEGRAM_POLL_INTERVAL_MS || 15000);
+const reconnectBackoffMs = Number(process.env.TELEGRAM_RECONNECT_BACKOFF_MS || 3000);
 
 if (!apiId || !apiHash) {
   console.error(
@@ -35,7 +37,39 @@ let latestMessageId = 0;
 let syncRunning = false;
 let pendingMessage = null;
 const handledMessageIds = new Set();
+let pollTimer = null;
+let reconnectInProgress = false;
+let lastReconnectAt = 0;
 
+function isNotConnectedError(err) {
+  const msg = String(err?.message || err || "").toLowerCase();
+  return msg.includes("not connected") || msg.includes("connection closed");
+}
+
+async function reconnectClient(reason = "unknown") {
+  const now = Date.now();
+  if (reconnectInProgress) return;
+  if (now - lastReconnectAt < reconnectBackoffMs) return;
+
+  reconnectInProgress = true;
+  lastReconnectAt = now;
+
+  try {
+    console.warn(`⚠️ Telegram disconnected. Reconnecting (${reason})...`);
+    try {
+      await client.disconnect();
+    } catch {
+      // ignore if already disconnected
+    }
+    await client.connect();
+    console.log("✅ Telegram reconnected");
+    await showLatestMessageFromTarget();
+  } catch (err) {
+    console.error("❌ Telegram reconnect failed:", err?.message || err);
+  } finally {
+    reconnectInProgress = false;
+  }
+}
 function runDirectSyncScript() {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["toonstream-supabase-sync.js"], {
@@ -165,6 +199,17 @@ function printMessage(prefix, message) {
   console.log("------------------------------\n");
 }
 
+function processIncomingMessage(message, source = "event") {
+  if (!message) return;
+  if (message.id <= latestMessageId) return;
+
+  latestMessageId = message.id;
+  printMessage(`🆕 New message received in ${targetChatId} [${source}]`, message);
+
+  console.log("🎯 New channel message detected. Triggering sync...");
+  void runSyncScript(message);
+}
+
 async function showLatestMessageFromTarget() {
   const entity = await client.getEntity(targetChatId);
   const messages = await client.getMessages(entity, { limit: 1 });
@@ -177,6 +222,21 @@ async function showLatestMessageFromTarget() {
   const latest = messages[0];
   latestMessageId = latest.id || 0;
   printMessage(`📌 Latest existing message in ${targetChatId}`, latest);
+}
+
+async function pollLatestMessage() {
+  try {
+    const entity = await client.getEntity(targetChatId);
+    const messages = await client.getMessages(entity, { limit: 1 });
+    if (!messages || messages.length === 0) return;
+
+    processIncomingMessage(messages[0], "poll");
+  } catch (err) {
+    console.warn("⚠️ Poll check failed:", err?.message || err);
+    if (isNotConnectedError(err)) {
+      await reconnectClient("poll");
+    }
+  }
 }
 
 async function startListener() {
@@ -192,17 +252,16 @@ async function startListener() {
 
       if (!message) return;
       if (!sameChat(incomingChatId, targetChatId)) return;
-      if (message.id <= latestMessageId) return;
-
-      latestMessageId = message.id;
-      printMessage(`🆕 New message received in ${targetChatId}`, message);
-
-      console.log("🎯 New channel message detected. Triggering sync...");
-      void runSyncScript(message);
+      processIncomingMessage(message, "event");
     },
     new NewMessage({}),
   );
 
+  pollTimer = setInterval(() => {
+    void pollLatestMessage();
+  }, pollIntervalMs);
+
+  console.log(`🛰️ Poll fallback enabled every ${Math.round(pollIntervalMs / 1000)}s`);
   console.log(`👂 Listening for new messages in chat ${targetChatId}...`);
 }
 
@@ -211,8 +270,31 @@ startListener().catch((error) => {
   process.exit(1);
 });
 
+process.on("uncaughtException", (err) => {
+  if (isNotConnectedError(err)) {
+    console.warn("⚠️ Transient Telegram connection exception handled.");
+    void reconnectClient("uncaughtException");
+    return;
+  }
+  console.error("❌ Uncaught exception:", err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  if (isNotConnectedError(reason)) {
+    console.warn("⚠️ Transient Telegram rejection handled.");
+    void reconnectClient("unhandledRejection");
+    return;
+  }
+  console.error("❌ Unhandled rejection:", reason);
+});
+
 process.once("SIGINT", async () => {
   console.log("\nStopping listener...");
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
   await client.disconnect();
   process.exit(0);
 });
