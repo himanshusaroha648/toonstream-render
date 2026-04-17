@@ -1372,29 +1372,63 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
   // Memory cache hit
   if (seriesCache.has(finalSlug)) {
     const cached = seriesCache.get(finalSlug);
-    if (!cached.isMovie) {
-      if (cached.tmdb_id) return cached; // Use series cache only when tmdb_id is present
-      seriesCache.delete(finalSlug); // stale/incomplete cache, refresh from DB
+    const cachedIsMovie = Boolean(cached?.isMovie);
+    if (cachedIsMovie === isMovieUrl) {
+      if (isMovieUrl || cached.tmdb_id) {
+        return {
+          ...cached,
+          url: seriesUrl,
+          sourceSlug: rawSlug,
+          isMovie: cachedIsMovie,
+        };
+      }
+      // stale/incomplete series cache, refresh from DB
+      seriesCache.delete(finalSlug);
+    } else {
+      // cache type mismatch (movie vs series), force a fresh resolve
+      seriesCache.delete(finalSlug);
     }
-    if (isMovieUrl) return cached;      // URL is movie — use movie cache
-    // Was cached as movie but URL is series — clear cache and re-resolve
-    seriesCache.delete(finalSlug);
   }
 
-  if (localSeriesCache[finalSlug] && !localSeriesCache[finalSlug].isMovie) {
+  if (localSeriesCache[finalSlug]) {
     const cached = localSeriesCache[finalSlug];
-    if (cached.tmdb_id) {
+    const cachedIsMovie = Boolean(cached?.isMovie);
+    if (cachedIsMovie === isMovieUrl) {
+      if (isMovieUrl || cached.tmdb_id) {
+        const ctx = {
+          ...cached,
+          url: seriesUrl,
+          sourceSlug: rawSlug,
+          isMovie: cachedIsMovie,
+        };
+        seriesCache.set(finalSlug, ctx);
+        return ctx;
+      }
+      delete localSeriesCache[finalSlug];
+      saveCache(SERIES_CACHE_FILE, localSeriesCache);
+    }
+  }
+
+  // Movie URL should prefer movies table first.
+  if (isMovieUrl) {
+    const { data: movieData } = await supabase
+      .from("movies")
+      .select("*")
+      .eq("slug", finalSlug)
+      .maybeSingle();
+
+    if (movieData) {
       const ctx = {
-        ...cached,
+        ...movieData,
         url: seriesUrl,
         sourceSlug: rawSlug,
-        isMovie: false,
+        isMovie: true,
       };
       seriesCache.set(finalSlug, ctx);
+      localSeriesCache[finalSlug] = { ...movieData, isMovie: true };
+      saveCache(SERIES_CACHE_FILE, localSeriesCache);
       return ctx;
     }
-    delete localSeriesCache[finalSlug];
-    saveCache(SERIES_CACHE_FILE, localSeriesCache);
   }
 
   // Check series table first
@@ -1432,11 +1466,9 @@ async function resolveSeriesContext(seriesUrl, fallbackTitle) {
     if (movieData) {
       if (isMovieUrl) {
         // Genuine movie URL — use movie record
-        seriesData = movieData;
-        isMovie = true;
-        const ctx = { ...seriesData, url: seriesUrl, sourceSlug: rawSlug, isMovie: true };
+        const ctx = { ...movieData, url: seriesUrl, sourceSlug: rawSlug, isMovie: true };
         seriesCache.set(finalSlug, ctx);
-        localSeriesCache[finalSlug] = { ...seriesData, isMovie: true };
+        localSeriesCache[finalSlug] = { ...movieData, isMovie: true };
         saveCache(SERIES_CACHE_FILE, localSeriesCache);
         return ctx;
       } else {
