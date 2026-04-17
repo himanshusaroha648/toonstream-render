@@ -8,9 +8,21 @@ import { start as runSyncScript, fetchFullSeries } from "./toonstream-supabase-s
 const app = express();
 const PORT = process.env.PORT || 5000;
 const AUTO_SYNC_ON_START = process.env.AUTO_SYNC_ON_START === "true";
-const ENABLE_CRON_SYNC = process.env.ENABLE_CRON_SYNC === "true";
-const ENABLE_TELEGRAM_TRIGGER =
+const TELEGRAM_MESSAGE = process.env.TELEGRAM_MESSAGE !== "false";
+const TELEGRAM_API_ID = process.env.TELEGRAM_API_ID || process.env.API_ID;
+const TELEGRAM_API_HASH = process.env.TELEGRAM_API_HASH || process.env.API_HASH;
+const TELEGRAM_SESSION =
+  process.env.TELEGRAM_SESSION || process.env.telegram_Session || "";
+const TELEGRAM_CREDENTIALS_READY =
+  Boolean(TELEGRAM_API_ID) &&
+  Boolean(TELEGRAM_API_HASH) &&
+  Boolean(TELEGRAM_SESSION);
+const ENABLE_TELEGRAM_TRIGGER = TELEGRAM_MESSAGE &&
+  TELEGRAM_CREDENTIALS_READY &&
   process.env.ENABLE_TELEGRAM_TRIGGER !== "false";
+const ENABLE_CRON_SYNC = ENABLE_TELEGRAM_TRIGGER
+  ? process.env.ENABLE_CRON_SYNC === "true"
+  : true;
 const TELEGRAM_RESTART_DELAY_MS = Number(
   process.env.TELEGRAM_RESTART_DELAY_MS || 5000,
 );
@@ -109,6 +121,55 @@ const supabase2 = createClient(
 
 const tmdb = new TMDBService(process.env.TMDB_API_KEY);
 
+function normalizeServerList(input = []) {
+  const servers = [];
+  for (const item of input) {
+    let url = "";
+    if (typeof item === "string") {
+      url = item.trim();
+    } else if (item && typeof item === "object") {
+      url = String(item.real_video || item.url || "").trim();
+    }
+
+    if (!url) continue;
+    servers.push({ option: servers.length + 1, real_video: url });
+  }
+  return servers;
+}
+
+function parseServersRaw(raw = "") {
+  const text = String(raw || "").trim();
+  if (!text) return [];
+
+  if (text.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return normalizeServerList(parsed);
+    } catch {
+      return [];
+    }
+  }
+
+  return normalizeServerList(
+    text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+  );
+}
+
+function dedupeServersByUrl(input = []) {
+  const seen = new Set();
+  const deduped = [];
+  for (const item of input) {
+    const url = String(item?.real_video || "").trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    deduped.push({ option: deduped.length + 1, real_video: url });
+  }
+  return deduped;
+}
+
 app.use(express.json());
 app.use(express.static("public"));
 app.use("/admin", express.static("admin"));
@@ -173,18 +234,47 @@ app.get("/api/logs/stream", (req, res) => {
 // Dashboard API
 app.get("/api/series", async (req, res) => {
   const query = req.query.q;
-  let supabaseQuery = supabase.from("series").select("*");
-  
+
   if (query) {
-    supabaseQuery = supabaseQuery.ilike("title", `%${query}%`);
+    const [seriesRes, moviesRes] = await Promise.all([
+      supabase
+        .from("series")
+        .select("*")
+        .ilike("title", `%${query}%`)
+        .order("updated_at", { ascending: false })
+        .limit(20),
+      supabase
+        .from("movies")
+        .select("*")
+        .ilike("title", `%${query}%`)
+        .order("updated_at", { ascending: false })
+        .limit(20),
+    ]);
+
+    if (seriesRes.error) {
+      return res.status(500).json({ error: seriesRes.error.message });
+    }
+
+    if (moviesRes.error) {
+      return res.status(500).json({ error: moviesRes.error.message });
+    }
+
+    const combined = [
+      ...(seriesRes.data || []).map((row) => ({ ...row, is_movie: false })),
+      ...(moviesRes.data || []).map((row) => ({ ...row, is_movie: true })),
+    ]
+      .sort((a, b) => {
+        const aTime = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+        const bTime = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+        return bTime - aTime;
+      })
+      .slice(0, 20);
+
+    return res.json(combined);
   } else {
     // If no search query, return empty or limit to avoid heavy load
     return res.json([]);
   }
-
-  const { data, error } = await supabaseQuery.order("updated_at", { ascending: false }).limit(20);
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
 });
 
 app.post("/api/series/add", async (req, res) => {
@@ -274,8 +364,8 @@ app.post("/api/series/refetch", async (req, res) => {
 });
 
 app.post("/api/series/rename", async (req, res) => {
-  const { id, newName, type } = req.body;
-  const targetTable = type === "movie" ? "movies" : "series";
+  const { id, newName, type, isMovie } = req.body;
+  const targetTable = type === "movie" || isMovie ? "movies" : "series";
   const { error } = await supabase.from(targetTable).update({ title: newName }).eq("id", id);
   if (error) return res.status(500).json({ error: error.message });
   res.json({ success: true });
@@ -297,6 +387,72 @@ app.get("/api/episodes", async (req, res) => {
   const { data, error } = await query.order("episode", { ascending: true });
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
+});
+
+app.get("/api/movies/:id/servers", async (req, res) => {
+  const { id } = req.params;
+  const { data, error } = await supabase
+    .from("movies")
+    .select("id,title,servers")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: "Movie not found" });
+
+  const servers = normalizeServerList(Array.isArray(data.servers) ? data.servers : []);
+  res.json({ id: data.id, title: data.title, servers });
+});
+
+app.post("/api/movies/servers/update", async (req, res) => {
+  const { id, mode = "append", servers, serversRaw } = req.body || {};
+  if (!id) return res.status(400).json({ error: "Movie id is required" });
+
+  const incoming = Array.isArray(servers)
+    ? normalizeServerList(servers)
+    : parseServersRaw(serversRaw || "");
+
+  if (incoming.length === 0) {
+    return res.status(400).json({
+      error:
+        "No valid servers found. Paste JSON array or one URL per line in servers input.",
+    });
+  }
+
+  const { data: movie, error: movieError } = await supabase
+    .from("movies")
+    .select("id,title,servers")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (movieError) return res.status(500).json({ error: movieError.message });
+  if (!movie) return res.status(404).json({ error: "Movie not found" });
+
+  const existing = normalizeServerList(Array.isArray(movie.servers) ? movie.servers : []);
+  const finalServers = mode === "replace"
+    ? normalizeServerList(incoming)
+    : dedupeServersByUrl([...existing, ...incoming]);
+
+  const { error: updateError } = await supabase
+    .from("movies")
+    .update({
+      servers: finalServers,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id);
+
+  if (updateError) return res.status(500).json({ error: updateError.message });
+
+  res.json({
+    success: true,
+    mode,
+    movieId: movie.id,
+    title: movie.title,
+    previousCount: existing.length,
+    incomingCount: incoming.length,
+    finalCount: finalServers.length,
+    servers: finalServers,
+  });
 });
 
 app.post("/api/episodes/refetch-images", async (req, res) => {
@@ -514,8 +670,19 @@ async function runSync() {
   }
 }
 
-const cronExpression = process.env.CRON_SCHEDULE || "*/10 * * * *";
+const cronExpression = TELEGRAM_MESSAGE
+  ? process.env.CRON_SCHEDULE || "*/10 * * * *"
+  : "*/10 * * * *";
 if (ENABLE_CRON_SYNC) {
+  if (!TELEGRAM_MESSAGE) {
+    console.log(
+      "ℹ️ TELEGRAM_MESSAGE=false, forcing scheduled sync every 10 minutes",
+    );
+  } else if (!TELEGRAM_CREDENTIALS_READY) {
+    console.log(
+      "ℹ️ Telegram credentials missing, forcing scheduled sync every 10 minutes",
+    );
+  }
   cron.schedule(cronExpression, () => {
     console.log("\n⏰ Scheduled sync triggered");
     runSync();
@@ -532,6 +699,18 @@ function updateNextRunTime() {
 
 function startTelegramListener() {
   if (shuttingDown) return;
+
+  if (!TELEGRAM_MESSAGE) {
+    console.log("ℹ️ Telegram checks are disabled (TELEGRAM_MESSAGE=false)");
+    return;
+  }
+
+  if (!TELEGRAM_CREDENTIALS_READY) {
+    console.log(
+      "ℹ️ Telegram listener disabled: missing TELEGRAM_API_ID/API_ID, TELEGRAM_API_HASH/API_HASH, or TELEGRAM_SESSION",
+    );
+    return;
+  }
 
   if (!ENABLE_TELEGRAM_TRIGGER) {
     console.log("ℹ️ Telegram trigger listener is disabled (ENABLE_TELEGRAM_TRIGGER=false)");
