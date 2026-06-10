@@ -305,6 +305,15 @@ function forceToEpisodeDomain(rawUrl, base = TOONSTREAM_EPISODE_ORIGIN) {
     urlObj.hostname = targetOrigin.hostname;
     urlObj.port = targetOrigin.port;
 
+    const basePath = getEpisodeBasePath();
+    if (basePath && basePath !== "/") {
+      let sep = basePath.endsWith("/") ? "" : "/";
+      let origPath = urlObj.pathname.startsWith("/") ? urlObj.pathname.substring(1) : urlObj.pathname;
+      if (!urlObj.pathname.startsWith(basePath)) {
+        urlObj.pathname = `${basePath}${sep}${origPath}`;
+      }
+    }
+
     return urlObj.href;
   } catch {
     return normalized;
@@ -373,7 +382,9 @@ function buildEpisodeUrl(seriesSlug, season, episode) {
   if (!seriesSlug) return null;
   const urlSlug =
     seriesSlug === "naruto-shippden" ? "naruto-shippuden" : seriesSlug;
-  return `${TOONSTREAM_EPISODE_ORIGIN}/episode/${urlSlug}-${season}x${episode}/`;
+  const basePath = getEpisodeBasePath();
+  const sep = basePath.endsWith("/") ? "" : "/";
+  return `${TOONSTREAM_EPISODE_ORIGIN}${basePath}${sep}episode/${urlSlug}-${season}x${episode}/`;
 }
 
 function isValidEpisodeUrl(url) {
@@ -1214,8 +1225,10 @@ async function extractEmbeds(html, episodeUrl) {
         if (!pairs.has(key)) pairs.set(key, { trid: m[2], trtype: m[1] });
       }
       let idx = 0;
+      const basePath = getEpisodeBasePath();
+      const sep = basePath.endsWith("/") ? "" : "/";
       for (const { trid, trtype } of pairs.values()) {
-        const url = `${TOONSTREAM_EPISODE_ORIGIN}/?trembed=${idx}&trid=${trid}&trtype=${trtype}`;
+        const url = `${TOONSTREAM_EPISODE_ORIGIN}${basePath}${sep}?trembed=${idx}&trid=${trid}&trtype=${trtype}`;
         trembedUrls.push(url);
         idx++;
       }
