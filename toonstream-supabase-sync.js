@@ -25,8 +25,9 @@ const supabase = createClient(
 );
 
 const CONFIG = {
-  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstram-home.chanchalsaroha8950.workers.dev/api/home",
-  episodeBaseUrl: process.env.TOONSTREAM_EPISODE_BASE_URL || "https://toonstream.live/",
+  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstream-home-proxy.chanchalsaroha8950.workers.dev/api/home",
+  episodeBaseUrl: process.env.TOONSTREAM_EPISODE_BASE_URL || "https://toonstream-home-proxy.chanchalsaroha8950.workers.dev/api",
+  relayUrl: process.env.TOONSTREAM_RELAY_URL || "https://request-relay-worker.himanshusaroha1.workers.dev/api/relay",
   homeRetryDelaysMs: (process.env.HOME_RETRY_DELAYS_MS || "20000,40000,120000")
     .split(",")
     .map((v) => Number(v.trim()))
@@ -39,7 +40,7 @@ const CONFIG = {
   toonstreamCookies: process.env.TOONSTREAM_COOKIES?.trim() || null,
   ajaxUrl:
     process.env.TOONSTREAM_AJAX_URL ||
-    "https://toonstream.dad/home/wp-admin/admin-ajax.php",
+    "https://toonstream.vip/wp-admin/admin-ajax.php",
 };
 
 const defaultFallbacks = [`${CONFIG.homeUrl}home/`, `${CONFIG.homeUrl}page/1/`];
@@ -335,13 +336,29 @@ function deriveSeriesUrlFromEpisode(episodeUrl) {
   try {
     const u = new URL(episodeUrl);
     const parts = u.pathname.split("/").filter(Boolean);
-    const episodeSlug = parts[1] || parts[parts.length - 1] || "";
+    const episodeSlug = parts[parts.length - 1] || "";
     if (!episodeSlug) return null;
     const baseSlug = episodeSlug.replace(/-\d+x\d+$/i, "") || episodeSlug;
     const normalizedSlug = cleanSlug(baseSlug);
-    return `${TOONSTREAM_EPISODE_ORIGIN}/series/${normalizedSlug}/`;
+    const episodeIndex = parts.findIndex((part) => part === "episode");
+    const prefixParts = episodeIndex >= 0 ? parts.slice(0, episodeIndex) : [];
+    const prefixPath = prefixParts.length ? `/${prefixParts.join("/")}/` : "/";
+    return `${u.origin}${prefixPath}series/${normalizedSlug}/`;
   } catch {
     return null;
+  }
+}
+
+function getEpisodeBasePath() {
+  try {
+    const pathParts = new URL(CONFIG.episodeBaseUrl).pathname.split("/").filter(Boolean);
+    if (pathParts.length === 0) return "/";
+    if (["home", "episode", "series"].includes(pathParts[pathParts.length - 1])) {
+      pathParts.pop();
+    }
+    return pathParts.length ? `/${pathParts.join("/")}/` : "/";
+  } catch {
+    return "/";
   }
 }
 
@@ -349,7 +366,7 @@ function buildSeriesUrlFromSlug(seriesSlug) {
   if (!seriesSlug) return null;
   const urlSlug =
     seriesSlug === "naruto-shippden" ? "naruto-shippuden" : seriesSlug;
-  return `${TOONSTREAM_EPISODE_ORIGIN}/series/${urlSlug}/`;
+  return `${TOONSTREAM_EPISODE_ORIGIN}${getEpisodeBasePath()}series/${urlSlug}/`;
 }
 
 function buildEpisodeUrl(seriesSlug, season, episode) {
@@ -733,21 +750,48 @@ function parseEpisodeCode(url) {
   }
 }
 
-function extractPostId(html) {
+function extractPostIdCandidates(html) {
+  const candidates = [];
+  const seen = new Set();
+  const push = (value) => {
+    if (!value) return;
+    const normalized = String(value).trim();
+    if (!/^\d+$/.test(normalized) || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  const $ = cheerio.load(html || "");
+  [
+    ".sel-temp [data-post]",
+    ".sel-temp a[data-post]",
+    "[data-post]",
+  ].forEach((selector) => {
+    $(selector).each((_, el) => push($(el).attr("data-post")));
+  });
+
   const patterns = [
-    // Toonstream season selector: <a data-post="1914"
     /class=["'][^"']*sel-temp[^"']*"[^>]*>\s*<a[^>]+data-post=["'](\d+)["']/i,
     /class=["'](?:postid-|wp-post-id-)(\d+)["']/i,
     /["']postid["']\s*:\s*(\d+)/i,
     /var\s+post_id\s*=\s*(\d+)/i,
     /data-post=["'](\d+)["']/i,
-    /"post"\s*:\s*"(\d+)"/i,
+    /["']post["']\s*:\s*["']?(\d+)["']?/i,
   ];
+
   for (const pat of patterns) {
-    const m = html.match(pat);
-    if (m) return m[1];
+    const globalPat = new RegExp(pat.source, pat.flags.includes("g") ? pat.flags : `${pat.flags}g`);
+    let match;
+    while ((match = globalPat.exec(String(html || ""))) !== null) {
+      push(match[1]);
+    }
   }
-  return null;
+
+  return candidates;
+}
+
+function extractPostId(html) {
+  return extractPostIdCandidates(html)[0] || null;
 }
 
 function extractNonce(html) {
@@ -780,13 +824,38 @@ function getHomeAjaxUrl(pageUrl, pageHtml) {
   if (explicitSeasonApi) return explicitSeasonApi;
 
   if (pageHtml) {
-    const seasonApiMatch = pageHtml.match(
-      /(https?:\/\/[^"'\s]+\/fetch_episodes\.php)/i,
+    const ajaxApiMatch = pageHtml.match(
+      /(https?:\/\/[^"'\s]+\/wp-admin\/admin-ajax\.php)/i,
     );
-    if (seasonApiMatch?.[1]) return seasonApiMatch[1];
+    if (ajaxApiMatch?.[1]) return ajaxApiMatch[1];
   }
 
-  return `${TOONSTREAM_EPISODE_ORIGIN}/fetch_episodes.php`;
+  return CONFIG.ajaxUrl;
+}
+
+function buildRelayRequestBody(payload) {
+  const body = {};
+  for (const [key, value] of payload.entries()) {
+    body[key] = value;
+  }
+  return body;
+}
+
+async function postThroughRelay(targetUrl, payload, requestHeaders) {
+  const relayBody = {
+    targetUrl,
+    method: "POST",
+    contentType: "application/x-www-form-urlencoded",
+    headers: requestHeaders,
+    body: buildRelayRequestBody(payload),
+  };
+
+  return await axios.post(CONFIG.relayUrl, relayBody, {
+    headers: {
+      "Content-Type": "application/json",
+    },
+    timeout: 15000,
+  });
 }
 
 function extractEpisodesFromSeasonApiResponse(data, season, pageUrl) {
@@ -881,41 +950,56 @@ async function fetchEpisodeDataFromAPI(
 
   // Extract AJAX URL from page HTML first (handles cross-domain like toonstream.one → toonstream.dad)
   const ajaxUrl = getHomeAjaxUrl(pageUrl, pageHtml);
-  console.log(
-    `         🌐 Season ${season} API: GET ${ajaxUrl}?post=${postId}&season=${season}`,
-  );
+  const candidatePostIds = Array.from(
+    new Set([
+      String(postId),
+      ...extractPostIdCandidates(pageHtml),
+    ]),
+  ).filter(Boolean);
 
-  try {
-    const res = await axios.get(ajaxUrl, {
-      params: {
-        post: postId,
-        season,
-      },
-      headers: {
+  for (const candidatePostId of candidatePostIds) {
+    console.log(
+      `         🌐 Season ${season} API: POST ${ajaxUrl} action=action_select_season&season=${season}&post=${candidatePostId}`,
+    );
+
+    const payload = new URLSearchParams({
+      action: "action_select_season",
+      season: String(season),
+      post: String(candidatePostId),
+    });
+    if (nonce) {
+      payload.set("nonce", nonce);
+    }
+
+    try {
+      const res = await postThroughRelay(ajaxUrl, payload, {
         Referer: referer,
+        Origin: referer ? new URL(referer).origin : TOONSTREAM_ORIGIN,
         "User-Agent": getUA(),
         Accept: "application/json,text/html,*/*",
-      },
-      timeout: 15000,
-    });
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+      });
 
-    const episodes = extractEpisodesFromSeasonApiResponse(
-      res.data,
-      season,
-      pageUrl,
-    );
-    if (episodes.length > 0) {
-      console.log(
-        `         ✓ Season ${season}: ${episodes.length} episodes parsed from fetch_episodes API`,
+      const episodes = extractEpisodesFromSeasonApiResponse(
+        res.data,
+        season,
+        pageUrl,
+      );
+      if (episodes.length > 0) {
+        console.log(
+          `         ✓ Season ${season}: ${episodes.length} episodes parsed from action_select_season API`,
+        );
+        return episodes;
+      }
+    } catch (err) {
+      console.warn(
+        `         ⚠️ Season API error (post=${candidatePostId}, season=${season}): ${err.message}`,
       );
     }
-    return episodes;
-  } catch (err) {
-    console.warn(
-      `         ⚠️ Season API error (post=${postId}, season=${season}): ${err.message}`,
-    );
-    return [];
   }
+
+  return [];
 }
 
 function extractSeriesMeta(html, url) {
@@ -962,6 +1046,52 @@ function extractEmbedUrlFromResponse(data) {
   return null;
 }
 
+function extractFinalVideoUrlFromHtml(html) {
+  if (!html) return null;
+
+  const $ = cheerio.load(html);
+  const selectors = [
+    "iframe[src]",
+    "iframe[data-src]",
+    "video[src]",
+    "video[data-src]",
+    "source[src]",
+    "source[data-src]",
+    "embed[src]",
+  ];
+
+  for (const selector of selectors) {
+    let found = null;
+    $(selector).each((_, el) => {
+      if (found) return;
+      const node = $(el);
+      const rawUrl =
+        node.attr("src") ||
+        node.attr("data-src") ||
+        node.attr("data-file") ||
+        node.attr("data-video") ||
+        node.attr("data-url");
+      const normalized = normalizeUrl(rawUrl);
+      if (normalized && !isToonstream(normalized)) {
+        found = normalized;
+      }
+    });
+    if (found) return found;
+  }
+
+  const directUrlPatterns = [
+    /(?:src|file|source|url|video)\s*[:=]\s*["'](https?:\/\/(?![^"'\s]*toonstream)[^"'\s>]+)["']/i,
+    /<meta[^>]+property=["']og:video(?:[:_][^"']+)?["'][^>]+content=["'](https?:\/\/[^"'\s>]+)["']/i,
+  ];
+
+  for (const pattern of directUrlPatterns) {
+    const match = html.match(pattern);
+    if (match?.[1] && !isToonstream(match[1])) return match[1];
+  }
+
+  return null;
+}
+
 function isToonstream(url) {
   try {
     const host = new URL(url).hostname;
@@ -990,26 +1120,15 @@ async function resolveTrembedUrl(trembedUrl, episodeUrl) {
       validateStatus: (status) => status >= 200 && status < 400,
     });
     const pageHtml = res.data || "";
-    const $ = cheerio.load(pageHtml);
 
-    // Find any iframe that is NOT a toonstream domain
-    let found = null;
-    $("iframe[src], iframe[data-src]").each((_, el) => {
-      const src = $(el).attr("src") || $(el).attr("data-src");
-      if (!src || src.startsWith("about:") || src.startsWith("javascript:"))
-        return;
-      const cleaned = src.replace(/&#038;/g, "&").replace(/&amp;/g, "&");
-      if (!isToonstream(cleaned) && !found) {
-        found = cleaned;
-      }
-    });
-    if (found) return found;
+    const directVideoUrl = extractFinalVideoUrlFromHtml(pageHtml);
+    if (directVideoUrl) return directVideoUrl;
 
-    // Fallback: check script/inline for any external video URL
+    // Fallback: look for a plain external URL in the page source.
     const srcMatch = pageHtml.match(
-      /(?:src|file|source)\s*[:=]\s*["']((https?:\/\/(?!(?:[^/]*\.)?toonstream)[^"'\s]+))["']/i,
+      /(?:src|file|source|url|video)\s*[:=]\s*["'](https?:\/\/(?![^"'\s]*toonstream)[^"'\s>]+)["']/i,
     );
-    if (srcMatch) return srcMatch[1];
+    if (srcMatch?.[1]) return srcMatch[1];
 
     return null;
   } catch (err) {
