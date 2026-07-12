@@ -631,8 +631,8 @@ app.get("/status", (req, res) => {
   res.json({
     syncStatus,
     proxyEnabled: process.env.USE_PROXY === "true",
-    pollInterval: process.env.POLL_INTERVAL_MS || "600000",
-    syncIntervalMinutes: 10,
+    pollInterval: process.env.POLL_INTERVAL_MS || "900000",
+    syncIntervalMinutes: 15,
     timestamp: new Date().toISOString(),
   });
 });
@@ -671,16 +671,16 @@ async function runSync() {
 }
 
 const cronExpression = TELEGRAM_MESSAGE
-  ? process.env.CRON_SCHEDULE || "*/10 * * * *"
-  : "*/10 * * * *";
+  ? process.env.CRON_SCHEDULE || "*/15 * * * *"
+  : "*/15 * * * *";
 if (ENABLE_CRON_SYNC) {
   if (!TELEGRAM_MESSAGE) {
     console.log(
-      "ℹ️ TELEGRAM_MESSAGE=false, forcing scheduled sync every 10 minutes",
+      "ℹ️ TELEGRAM_MESSAGE=false, forcing scheduled sync every 15 minutes",
     );
   } else if (!TELEGRAM_CREDENTIALS_READY) {
     console.log(
-      "ℹ️ Telegram credentials missing, forcing scheduled sync every 10 minutes",
+      "ℹ️ Telegram credentials missing, forcing scheduled sync every 15 minutes",
     );
   }
   cron.schedule(cronExpression, () => {
@@ -693,7 +693,7 @@ if (ENABLE_CRON_SYNC) {
 
 function updateNextRunTime() {
   const now = new Date();
-  const next = new Date(now.getTime() + 600000);
+  const next = new Date(now.getTime() + 900000);
   syncStatus.nextRunTime = next.toISOString();
 }
 

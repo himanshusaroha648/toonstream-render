@@ -744,6 +744,74 @@ function extractSeriesEpisodeLinks(seriesHtml, seriesUrl) {
   return links;
 }
 
+function extractSeasonApiMap(html, seriesUrl) {
+  const $ = cheerio.load(html || "");
+  const seasonApiMap = new Map();
+
+  $(".season-btn[data-season][data-url], [data-season][data-url]").each((_, el) => {
+    const seasonRaw = $(el).attr("data-season");
+    const season = Number.parseInt(String(seasonRaw || ""), 10);
+    if (!Number.isFinite(season) || season <= 0) return;
+
+    const dataUrl = $(el).attr("data-url");
+    const absoluteUrl = forceToEpisodeDomain(
+      dataUrl,
+      seriesUrl || TOONSTREAM_EPISODE_ORIGIN,
+    );
+    if (!absoluteUrl) return;
+
+    seasonApiMap.set(season, absoluteUrl);
+  });
+
+  return seasonApiMap;
+}
+
+async function fetchEpisodeDataFromSeasonUrl(seasonUrl, season, seriesUrl) {
+  if (!seasonUrl) return [];
+
+  try {
+    console.log(
+      `         🌐 Season ${season} page API: GET ${seasonUrl}`,
+    );
+
+    const seasonHtml = await fetchHtmlWithRetry(seasonUrl, CONFIG.maxRetries, {
+      referer: seriesUrl || CONFIG.homeUrl,
+    });
+
+    const seasonLinks = extractSeriesEpisodeLinks(seasonHtml, seasonUrl).filter(
+      (ep) => ep.season === Number(season),
+    );
+
+    if (seasonLinks.length > 0) {
+      console.log(
+        `         ✓ Season ${season}: ${seasonLinks.length} episodes parsed from season page API`,
+      );
+      return seasonLinks.map((ep) => ({
+        ...ep,
+        url: forceToEpisodeDomain(ep.url, seasonUrl) || ep.url,
+      }));
+    }
+
+    const parsedEpisodes = extractEpisodesFromSeasonApiResponse(
+      seasonHtml,
+      season,
+      seasonUrl,
+    );
+    if (parsedEpisodes.length > 0) {
+      console.log(
+        `         ✓ Season ${season}: ${parsedEpisodes.length} episodes parsed from HTML response`,
+      );
+      return parsedEpisodes;
+    }
+  } catch (err) {
+    console.warn(
+      `         ⚠️ Season page API error (season=${season}): ${err.message}`,
+    );
+  }
+
+  return [];
+}
+
 function parseEpisodeCode(url) {
   try {
     const u = new URL(url);
@@ -1057,6 +1125,94 @@ function extractEmbedUrlFromResponse(data) {
   return null;
 }
 
+function collectEmbedFrameUrls(html, baseUrl) {
+  if (!html) return [];
+
+  const urls = [];
+  const seen = new Set();
+  const push = (rawUrl) => {
+    const normalized = normalizeUrl(rawUrl, baseUrl || TOONSTREAM_EPISODE_ORIGIN);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    urls.push(normalized);
+  };
+
+  try {
+    const $ = cheerio.load(html);
+    $("iframe[src], iframe[data-src]").each((_, el) => {
+      push($(el).attr("src") || $(el).attr("data-src"));
+    });
+  } catch {}
+
+  for (const match of String(html).matchAll(/(?:src|data-src)=["']([^"']*\/api\/embed\/[^"']+)["']/gi)) {
+    push(match[1]);
+  }
+
+  return urls;
+}
+
+async function resolveEmbedChain(startUrl, referer, depth = 0, visited = new Set()) {
+  const normalizedStart = normalizeUrl(startUrl, referer || TOONSTREAM_EPISODE_ORIGIN);
+  if (!normalizedStart) return null;
+  if (visited.has(normalizedStart)) return null;
+  visited.add(normalizedStart);
+
+  try {
+    const embedHtml = await fetchHtmlWithRetry(normalizedStart, CONFIG.maxRetries, {
+      referer: referer || CONFIG.homeUrl,
+    });
+
+    const directVideo = extractFinalVideoUrlFromHtml(embedHtml);
+    if (directVideo) return directVideo;
+
+    const nestedFrameUrls = collectEmbedFrameUrls(embedHtml, normalizedStart);
+
+    for (const nestedUrl of nestedFrameUrls) {
+      if (!isToonstream(nestedUrl)) return nestedUrl;
+    }
+
+    if (depth >= CONFIG.embedMaxDepth) return null;
+
+    for (const nestedUrl of nestedFrameUrls) {
+      const nestedPath = (() => {
+        try {
+          return new URL(nestedUrl).pathname;
+        } catch {
+          return "";
+        }
+      })();
+
+      if (!nestedPath.includes("/embed/") && !nestedPath.includes("/api/embed/")) continue;
+
+      const resolved = await resolveEmbedChain(
+        nestedUrl,
+        normalizedStart,
+        depth + 1,
+        visited,
+      );
+      if (resolved) return resolved;
+    }
+
+    const fallbackUrl = extractEmbedUrlFromResponse(embedHtml);
+    if (fallbackUrl && !isToonstream(fallbackUrl)) return fallbackUrl;
+    if (fallbackUrl && depth < CONFIG.embedMaxDepth) {
+      return await resolveEmbedChain(
+        fallbackUrl,
+        normalizedStart,
+        depth + 1,
+        visited,
+      );
+    }
+
+    return null;
+  } catch (err) {
+    console.warn(
+      `            ⚠️ resolveEmbedChain failed for ${normalizedStart}: ${err.message}`,
+    );
+    return null;
+  }
+}
+
 function extractFinalVideoUrlFromHtml(html) {
   if (!html) return null;
 
@@ -1174,6 +1330,31 @@ async function extractEmbeds(html, episodeUrl) {
     if (embeds.length > 0) {
       console.log(`            🔌 Found ${embeds.length} server URL(s) from data-src`);
       return embeds;
+    }
+
+    // New flow: episode page has option iframes like /api/embed/<id>.
+    const embedFrameUrls = collectEmbedFrameUrls(html, episodeUrl);
+    if (embedFrameUrls.length > 0) {
+      console.log(`            🔌 Found ${embedFrameUrls.length} embed frame URL(s)`);
+
+      for (let i = 0; i < embedFrameUrls.length; i++) {
+        const embedUrl = embedFrameUrls[i];
+        const label = `Server ${i + 1}`;
+        console.log(`            🔍 Resolving ${label}: ${embedUrl}`);
+
+        const realUrl = await resolveEmbedChain(embedUrl, episodeUrl);
+        if (realUrl && !seen.has(realUrl)) {
+          seen.add(realUrl);
+          embeds.push({ option: embeds.length + 1, real_video: realUrl, label });
+          console.log(
+            `            ✓ ${label} resolved: ${realUrl.substring(0, 80)}`,
+          );
+        } else if (!realUrl) {
+          console.warn(`            ⚠️ Could not resolve ${label} from embed URL`);
+        }
+      }
+
+      if (embeds.length > 0) return embeds;
     }
 
     const pageOrigin = (() => {
@@ -1698,6 +1879,7 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
     let postId = extractPostId(html);
     const nonce = extractNonce(html);
     let seasons = extractSeasonNumbers(html);
+    let seasonApiMap = extractSeasonApiMap(html, seriesUrl);
 
     // Fallback: Extract episodes from HTML if API might fail or to have a backup
     let htmlEpisodeLinks = extractSeriesEpisodeLinks(html, seriesUrl);
@@ -1723,6 +1905,13 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
           if (triggerSeasons.length > 0) {
             const combined = new Set([...(seasons || []), ...triggerSeasons]);
             seasons = Array.from(combined).sort((a, b) => a - b);
+          }
+
+          const triggerSeasonApiMap = extractSeasonApiMap(triggerHtml, seriesUrl);
+          for (const [seasonNum, apiUrl] of triggerSeasonApiMap.entries()) {
+            if (!seasonApiMap.has(seasonNum)) {
+              seasonApiMap.set(seasonNum, apiUrl);
+            }
           }
 
           const triggerEpisodeLinks = extractSeriesEpisodeLinks(
@@ -1775,13 +1964,26 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
     const allEpisodeLinks = [];
     for (const season of seasons) {
       console.log(`         • Fetching Season ${season}...`);
-      const episodeData = await fetchEpisodeDataFromAPI(
-        postId,
-        season,
-        nonce,
-        seriesUrl,
-        html,
-      );
+      const seasonApiUrl = seasonApiMap.get(Number(season));
+      let episodeData = [];
+
+      if (seasonApiUrl) {
+        episodeData = await fetchEpisodeDataFromSeasonUrl(
+          seasonApiUrl,
+          season,
+          seriesUrl,
+        );
+      }
+
+      if (episodeData.length === 0) {
+        episodeData = await fetchEpisodeDataFromAPI(
+          postId,
+          season,
+          nonce,
+          seriesUrl,
+          html,
+        );
+      }
 
       if (episodeData.length === 0) {
         console.log(
@@ -2077,6 +2279,7 @@ export async function fetchFullSeries(seriesUrl, onProgress) {
     const postId = extractPostId(html);
     const nonce = extractNonce(html);
     const seasons = extractSeasonNumbers(html);
+    const seasonApiMap = extractSeasonApiMap(html, seriesUrl);
     const htmlEpisodeLinks = extractSeriesEpisodeLinks(html, seriesUrl);
     const meta = extractSeriesMeta(html, seriesUrl);
     const rawSlug = extractSeriesSlugFromUrl(seriesUrl);
@@ -2089,13 +2292,26 @@ export async function fetchFullSeries(seriesUrl, onProgress) {
     const allEpisodeLinks = [];
     for (const season of seasons) {
       log(`   ↳ Season ${season}: calling API...`);
-      const apiEps = await fetchEpisodeDataFromAPI(
-        postId,
-        season,
-        nonce,
-        seriesUrl,
-        html,
-      );
+      const seasonApiUrl = seasonApiMap.get(Number(season));
+      let apiEps = [];
+
+      if (seasonApiUrl) {
+        apiEps = await fetchEpisodeDataFromSeasonUrl(
+          seasonApiUrl,
+          season,
+          seriesUrl,
+        );
+      }
+
+      if (apiEps.length === 0) {
+        apiEps = await fetchEpisodeDataFromAPI(
+          postId,
+          season,
+          nonce,
+          seriesUrl,
+          html,
+        );
+      }
       if (apiEps.length > 0) {
         log(`   ✓ Season ${season}: ${apiEps.length} episodes from API`);
         apiEps.forEach((ep) =>
