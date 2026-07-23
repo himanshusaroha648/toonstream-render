@@ -25,8 +25,8 @@ const supabase = createClient(
 );
 
 const CONFIG = {
-  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstream-home-proxy.chanchalsaroha8950.workers.dev/api/home",
-  episodeBaseUrl: process.env.TOONSTREAM_EPISODE_BASE_URL || "https://toonstream-home-proxy.chanchalsaroha8950.workers.dev/api",
+  homeUrl: process.env.TOONSTREAM_HOME_URL || "https://toonstream-home-proxy.toonstram.workers.dev/api/home",
+  episodeBaseUrl: process.env.TOONSTREAM_EPISODE_BASE_URL || "https://toonstream-home-proxy.toonstram.workers.dev/api",
   relayUrl: process.env.TOONSTREAM_RELAY_URL || "https://request-relay-worker.himanshusaroha1.workers.dev/api/relay",
   homeRetryDelaysMs: (process.env.HOME_RETRY_DELAYS_MS || "20000,40000,120000")
     .split(",")
