@@ -335,7 +335,7 @@ function extractSeriesSlugFromUrl(seriesUrl) {
     const u = new URL(seriesUrl);
     const parts = u.pathname.split("/").filter(Boolean);
     const slug = parts.pop() || null;
-    return cleanSlug(slug);
+    return slug ? decodeURIComponent(slug) : null;
   } catch {
     return null;
   }
@@ -348,7 +348,7 @@ function deriveSeriesUrlFromEpisode(episodeUrl) {
     const episodeSlug = parts[parts.length - 1] || "";
     if (!episodeSlug) return null;
     const baseSlug = episodeSlug.replace(/-\d+x\d+$/i, "") || episodeSlug;
-    const normalizedSlug = cleanSlug(baseSlug);
+    const normalizedSlug = decodeURIComponent(baseSlug);
     const episodeIndex = parts.findIndex((part) => part === "episode");
     const prefixParts = episodeIndex >= 0 ? parts.slice(0, episodeIndex) : [];
     const prefixPath = prefixParts.length ? `/${prefixParts.join("/")}/` : "/";
@@ -1340,18 +1340,10 @@ async function extractEmbeds(html, episodeUrl) {
       for (let i = 0; i < embedFrameUrls.length; i++) {
         const embedUrl = embedFrameUrls[i];
         const label = `Server ${i + 1}`;
-        console.log(`            🔍 Resolving ${label}: ${embedUrl}`);
-
-        const realUrl = await resolveEmbedChain(embedUrl, episodeUrl);
-        if (realUrl && !seen.has(realUrl)) {
-          seen.add(realUrl);
-          embeds.push({ option: embeds.length + 1, real_video: realUrl, label });
-          console.log(
-            `            ✓ ${label} resolved: ${realUrl.substring(0, 80)}`,
-          );
-        } else if (!realUrl) {
-          console.warn(`            ⚠️ Could not resolve ${label} from embed URL`);
-        }
+        if (seen.has(embedUrl)) continue;
+        seen.add(embedUrl);
+        embeds.push({ option: embeds.length + 1, real_video: embedUrl, label });
+        console.log(`            ✓ ${label} saved: ${embedUrl}`);
       }
 
       if (embeds.length > 0) return embeds;
@@ -1872,10 +1864,26 @@ function extractSeasonNumbers(html) {
 
 async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
   try {
-    const seriesUrl = seriesCtx.url || buildSeriesUrlFromSlug(seriesCtx.slug);
+    let seriesUrl =
+      seriesCtx.url || buildSeriesUrlFromSlug(seriesCtx.sourceSlug || seriesCtx.slug);
     console.log(`      🔍 Fetching series data: ${seriesUrl}`);
 
-    const html = await fetchHtmlWithRetry(seriesUrl);
+    let html;
+    try {
+      html = await fetchHtmlWithRetry(seriesUrl);
+    } catch (primaryError) {
+      const sourceSlug = seriesCtx.sourceSlug || extractSeriesSlugFromUrl(seriesUrl);
+      const fallbackSlug = cleanSlug(sourceSlug || seriesCtx.slug);
+      const fallbackUrl = buildSeriesUrlFromSlug(fallbackSlug);
+
+      if (!fallbackUrl || fallbackUrl === seriesUrl) throw primaryError;
+
+      console.warn(
+        `      🔁 Series URL fallback: ${seriesUrl} → ${fallbackUrl}`,
+      );
+      seriesUrl = fallbackUrl;
+      html = await fetchHtmlWithRetry(seriesUrl);
+    }
     let postId = extractPostId(html);
     const nonce = extractNonce(html);
     let seasons = extractSeasonNumbers(html);
