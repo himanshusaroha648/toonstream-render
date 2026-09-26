@@ -2096,23 +2096,15 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
         foundTriggerInSeries = true;
       }
 
-      if (isTriggering || !existsInDb) {
+      if (!existsInDb) {
         processCount++;
-        let reason = "missing-in-db";
-        if (isTriggering && existsInDb) reason = "trigger-latest-refetch";
-        else if (isTriggering && !existsInDb) reason = "trigger-new-episode";
+        const reason = isTriggering ? "trigger-new-episode" : "missing-in-db";
 
         console.log(
           `      🔎 CHECK S${ep.season}E${ep.episode} -> SYNC (${reason})`,
         );
 
-        if (isTriggering && existingEpisodes.has(key)) {
-          console.log(
-            `      🔄 Re-fetching latest episode: S${ep.season}E${ep.episode} (even though it exists)`,
-          );
-        } else {
-          console.log(`      📺 Syncing: S${ep.season}E${ep.episode}`);
-        }
+        console.log(`      📺 Syncing: S${ep.season}E${ep.episode}`);
         const syncUrl = isTriggering
           ? forceToEpisodeDomain(triggeringEpisode?.url || ep.url, seriesUrl)
           : ep.url;
@@ -2135,7 +2127,10 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
       }
     }
 
-    if (triggeringEpisode && !foundTriggerInSeries) {
+    const triggerKey = triggeringEpisode
+      ? makeSeasonEpisodeKey(triggeringEpisode.season, triggeringEpisode.episode)
+      : null;
+    if (triggeringEpisode && !foundTriggerInSeries && !existingEpisodes.has(triggerKey)) {
       console.warn(
         `      ⚠️ Trigger episode S${triggeringEpisode.season}E${triggeringEpisode.episode} not found in fetched episode list`,
       );
