@@ -174,6 +174,7 @@ const TOONSTREAM_EPISODE_HOST = (() => {
 const CACHE_DIR = path.join(process.cwd(), "bin");
 const SERIES_CACHE_FILE = path.join(CACHE_DIR, "series_cache.json");
 const EPISODE_CACHE_FILE = path.join(CACHE_DIR, "episode_cache.json");
+const EPISODE_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -220,6 +221,12 @@ function makeEpisodeKey(slug, season, episode) {
 
 function makeSeasonEpisodeKey(season, episode) {
   return `${season}x${episode}`;
+}
+
+function isFreshEpisodeCacheEntry(entry) {
+  if (!entry?.updated_at) return false;
+  const updatedAt = Date.parse(entry.updated_at);
+  return Number.isFinite(updatedAt) && Date.now() - updatedAt < EPISODE_CACHE_MAX_AGE_MS;
 }
 
 function delay(ms) {
@@ -1457,7 +1464,11 @@ async function syncEpisodeByUrl(url, options = {}) {
       options.code?.season || 1,
       options.code?.episode || 1,
     );
-    if (!options.force && localEpisodeCache[key]) return;
+    if (isFreshEpisodeCacheEntry(localEpisodeCache[key])) {
+      console.log(`         ⏭️ Local cache is fresh: ${key}`);
+      stats.skippedEpisodes++;
+      return;
+    }
     const { seriesCtx, code, episodePayload } = await buildEpisodeRecord(
       url,
       options,
@@ -2045,12 +2056,15 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
 
     const { data: existingData } = await supabase
       .from("episodes")
-      .select("season, episode")
+      .select("season, episode, title, thumbnail, episode_main_poster, episode_card_thumbnail, episode_list_thumbnail, video_player_thumbnail, servers, updated_at")
       .eq("series_slug", seriesCtx.slug);
     const existingEpisodes = new Set();
+    const existingEpisodeRows = new Map();
     const supabaseSeasonMap = new Map();
     existingData?.forEach((ep) => {
-      existingEpisodes.add(makeSeasonEpisodeKey(ep.season, ep.episode));
+      const key = makeSeasonEpisodeKey(ep.season, ep.episode);
+      existingEpisodes.add(key);
+      existingEpisodeRows.set(key, ep);
       supabaseSeasonMap.set(
         ep.season,
         (supabaseSeasonMap.get(ep.season) || 0) + 1,
@@ -2081,11 +2095,14 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
     let processCount = 0;
     let checkedCount = 0;
     let skippedCount = 0;
+    let cacheChanged = false;
     let foundTriggerInSeries = false;
     for (const ep of allEpisodeLinks) {
       checkedCount++;
       const key = makeSeasonEpisodeKey(ep.season, ep.episode);
       const existsInDb = existingEpisodes.has(key);
+      const cacheKey = makeEpisodeKey(seriesCtx.slug, ep.season, ep.episode);
+      const cachedEpisode = localEpisodeCache[cacheKey];
       const isTriggering =
         triggeringEpisode &&
         ep.season === triggeringEpisode.season &&
@@ -2096,9 +2113,37 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
         foundTriggerInSeries = true;
       }
 
-      if (!existsInDb) {
+      if (isFreshEpisodeCacheEntry(cachedEpisode)) {
+        skippedCount++;
+        stats.skippedEpisodes++;
+        console.log(
+          `      🔎 CHECK S${ep.season}E${ep.episode} -> SKIP (fresh-local-cache)`,
+        );
+      } else if (existsInDb && !cachedEpisode) {
+        const dbEpisode = existingEpisodeRows.get(key);
+        localEpisodeCache[cacheKey] = {
+          title: dbEpisode?.title || ep.title || `Episode ${ep.episode}`,
+          thumbnail: dbEpisode?.thumbnail || null,
+          episode_main_poster: dbEpisode?.episode_main_poster || null,
+          episode_card_thumbnail: dbEpisode?.episode_card_thumbnail || null,
+          episode_list_thumbnail: dbEpisode?.episode_list_thumbnail || null,
+          video_player_thumbnail: dbEpisode?.video_player_thumbnail || null,
+          servers: Array.isArray(dbEpisode?.servers) ? dbEpisode.servers : [],
+          updated_at: new Date().toISOString(),
+        };
+        cacheChanged = true;
+        skippedCount++;
+        stats.skippedEpisodes++;
+        console.log(
+          `      🔎 CHECK S${ep.season}E${ep.episode} -> SKIP (db-exists, added-to-local-cache)`,
+        );
+      } else if (!existsInDb || cachedEpisode) {
         processCount++;
-        const reason = isTriggering ? "trigger-new-episode" : "missing-in-db";
+        const reason = cachedEpisode
+          ? "local-cache-expired"
+          : isTriggering
+            ? "trigger-new-episode"
+            : "missing-in-db";
 
         console.log(
           `      🔎 CHECK S${ep.season}E${ep.episode} -> SYNC (${reason})`,
@@ -2126,6 +2171,8 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
         );
       }
     }
+
+    if (cacheChanged) saveCache(EPISODE_CACHE_FILE, localEpisodeCache);
 
     const triggerKey = triggeringEpisode
       ? makeSeasonEpisodeKey(triggeringEpisode.season, triggeringEpisode.episode)
