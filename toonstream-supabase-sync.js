@@ -2056,15 +2056,13 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
 
     const { data: existingData } = await supabase
       .from("episodes")
-      .select("season, episode, title, thumbnail, episode_main_poster, episode_card_thumbnail, episode_list_thumbnail, video_player_thumbnail, servers, updated_at")
+      .select("season, episode")
       .eq("series_slug", seriesCtx.slug);
     const existingEpisodes = new Set();
-    const existingEpisodeRows = new Map();
     const supabaseSeasonMap = new Map();
     existingData?.forEach((ep) => {
       const key = makeSeasonEpisodeKey(ep.season, ep.episode);
       existingEpisodes.add(key);
-      existingEpisodeRows.set(key, ep);
       supabaseSeasonMap.set(
         ep.season,
         (supabaseSeasonMap.get(ep.season) || 0) + 1,
@@ -2095,7 +2093,6 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
     let processCount = 0;
     let checkedCount = 0;
     let skippedCount = 0;
-    let cacheChanged = false;
     let foundTriggerInSeries = false;
     for (const ep of allEpisodeLinks) {
       checkedCount++;
@@ -2107,7 +2104,6 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
         triggeringEpisode &&
         ep.season === triggeringEpisode.season &&
         ep.episode === triggeringEpisode.episode;
-      const shouldBackfill = seasonsToBackfill.has(ep.season);
 
       if (isTriggering) {
         foundTriggerInSeries = true;
@@ -2119,31 +2115,15 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
         console.log(
           `      🔎 CHECK S${ep.season}E${ep.episode} -> SKIP (fresh-local-cache)`,
         );
-      } else if (existsInDb && !cachedEpisode) {
-        const dbEpisode = existingEpisodeRows.get(key);
-        localEpisodeCache[cacheKey] = {
-          title: dbEpisode?.title || ep.title || `Episode ${ep.episode}`,
-          thumbnail: dbEpisode?.thumbnail || null,
-          episode_main_poster: dbEpisode?.episode_main_poster || null,
-          episode_card_thumbnail: dbEpisode?.episode_card_thumbnail || null,
-          episode_list_thumbnail: dbEpisode?.episode_list_thumbnail || null,
-          video_player_thumbnail: dbEpisode?.video_player_thumbnail || null,
-          servers: Array.isArray(dbEpisode?.servers) ? dbEpisode.servers : [],
-          updated_at: new Date().toISOString(),
-        };
-        cacheChanged = true;
-        skippedCount++;
-        stats.skippedEpisodes++;
-        console.log(
-          `      🔎 CHECK S${ep.season}E${ep.episode} -> SKIP (db-exists, added-to-local-cache)`,
-        );
-      } else if (!existsInDb || cachedEpisode) {
+      } else {
         processCount++;
         const reason = cachedEpisode
           ? "local-cache-expired"
-          : isTriggering
-            ? "trigger-new-episode"
-            : "missing-in-db";
+          : existsInDb
+            ? "missing-local-cache"
+            : isTriggering
+              ? "trigger-new-episode"
+              : "missing-in-db";
 
         console.log(
           `      🔎 CHECK S${ep.season}E${ep.episode} -> SYNC (${reason})`,
@@ -2161,18 +2141,8 @@ async function ensureSeriesComplete(seriesCtx, triggeringEpisode = null) {
           force: true,
           code: { season: ep.season, episode: ep.episode },
         });
-      } else {
-        skippedCount++;
-        const skipReason = shouldBackfill
-          ? "already-in-db-backfill-skip"
-          : "already-in-db";
-        console.log(
-          `      🔎 CHECK S${ep.season}E${ep.episode} -> SKIP (${skipReason})`,
-        );
       }
     }
-
-    if (cacheChanged) saveCache(EPISODE_CACHE_FILE, localEpisodeCache);
 
     const triggerKey = triggeringEpisode
       ? makeSeasonEpisodeKey(triggeringEpisode.season, triggeringEpisode.episode)
